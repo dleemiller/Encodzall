@@ -6,6 +6,7 @@
 PyObject *AugmentationFailed;
 
 #include "tokenizer.h"
+#include "constants.h"
 
 
 // Method definitions
@@ -30,6 +31,12 @@ PyMODINIT_FUNC PyInit_tokenizer(void) {
     if (module == NULL) {
         return NULL;
     }
+
+    PyModule_AddIntConstant(module, "DEFAULT_PAD_ID", DEFAULT_PAD);
+    PyModule_AddIntConstant(module, "DEFAULT_END_ID", DEFAULT_END);
+    PyModule_AddIntConstant(module, "DEFAULT_TARGET_PAD_ID", DEFAULT_TARGET_PAD);
+    PyModule_AddIntConstant(module, "DEFAULT_TARGET_END_ID", DEFAULT_TARGET_END);
+
 
     return module;
 }
