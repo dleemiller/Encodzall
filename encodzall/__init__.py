@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-import numpy as np
+import torch
 
 from encodzall.tokenizer import tokenize, DEFAULT_PAD_ID, DEFAULT_END_ID
 
@@ -37,9 +37,9 @@ class Tokenizer:
             text, max_length=self.max_length, pad_id=self.pad_id, end_id=self.end_id
         )
         return {
-            "input_ids": np.array(input_ids),
-            "attention_mask": np.array(attention_mask),
-            "word_start": np.array(word_start),
+            "input_ids": torch.tensor(input_ids, dtype=torch.uint8),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.bool),
+            "word_start": torch.tensor(word_start, dtype=torch.bool),
         }
 
     @classmethod
