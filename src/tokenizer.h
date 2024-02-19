@@ -2,6 +2,7 @@
 #define ENCODZALL_TOKENIZER_H
 
 PyObject* tokenize(PyObject* self, PyObject* args, PyObject *keywds);
+PyObject* segment_words(PyObject* self, PyObject* args, PyObject *keywds);
 
 #endif
 
