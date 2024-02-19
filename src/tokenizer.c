@@ -113,7 +113,7 @@ void finalize_and_append_word(PyObject* current_word, PyObject* words_list, int 
 }
 
 
-PyObject* segment_words(PyObject* self, PyObject* args, PyObject* kwargs) {
+PyObject* make_targets(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyObject* tokens;
     PyObject* attention_mask;
     PyObject* word_starts;

@@ -108,7 +108,7 @@ class TestCTokenizer(unittest.TestCase):
         pad_id = 0
         end_id = 255
 
-        words, word_attention = tokenizer.segment_words(
+        words, word_attention = tokenizer.make_targets(
             tokens, attention_mask, word_starts, max_length, max_words, pad_id, end_id
         )
 
@@ -158,7 +158,7 @@ class TestCTokenizer(unittest.TestCase):
         pad_id = 0
         end_id = 255
 
-        words, word_attention = tokenizer.segment_words(
+        words, word_attention = tokenizer.make_targets(
             tokens, attention_mask, word_starts, max_length, max_words, pad_id, end_id
         )
 
@@ -181,7 +181,7 @@ class TestCTokenizer(unittest.TestCase):
         pad_id = 0
         end_id = 255
 
-        words, word_attention = tokenizer.segment_words(
+        words, word_attention = tokenizer.make_targets(
             tokens, attention_mask, word_starts, max_length, max_words, pad_id, end_id
         )
 

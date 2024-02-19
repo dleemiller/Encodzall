@@ -11,7 +11,7 @@ PyObject *AugmentationFailed;
 // Method definitions
 static PyMethodDef EncodZallMethods[] = {
     {"tokenize", (PyCFunction)tokenize, METH_VARARGS | METH_KEYWORDS, "Tokenize a string."},
-    {"segment_words", (PyCFunction)segment_words, METH_VARARGS | METH_KEYWORDS, "Segment words from tokenized string."},
+    {"make_targets", (PyCFunction)make_targets, METH_VARARGS | METH_KEYWORDS, "Segment words from tokenized string."},
     {NULL, NULL, 0, NULL} // Sentinel
 };
 
