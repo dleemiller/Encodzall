@@ -1,0 +1,15 @@
+[embedding]
+n_vocab = 256
+embedding_dim = 384
+max_seq_length = 8192
+
+[word_encoder]
+local_attn_window_size = 64
+use_dynamic_pos_bias = false
+head_dim = 64
+heads = 8
+depth = 4
+attention_dropout = 0.0
+prenorm = true
+ff_mult = 8
+ff_dropout = 0.0
