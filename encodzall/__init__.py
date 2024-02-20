@@ -4,21 +4,13 @@ import torch
 from encodzall.tokenizer import tokenize, DEFAULT_PAD_ID, DEFAULT_END_ID
 
 
-@dataclass
-class DefaultTokenizerConfig:
-    max_length: int = 2048
-    max_words: int = 512
-    pad_id: int = DEFAULT_PAD_ID
-    end_id: int = DEFAULT_END_ID
-
-
 class Tokenizer:
     _instance = None
     _config = None
 
     @property
     def max_length(self):
-        return self._config.max_length
+        return self._config.max_seq_length
 
     @property
     def max_words(self):
@@ -47,5 +39,5 @@ class Tokenizer:
         if cls._instance is None:
             cls._instance = cls.__new__(cls)
             assert config is not None
-            cls._config = config
+            cls._config = config.tokenizer
         return cls._instance

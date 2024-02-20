@@ -25,7 +25,8 @@ class LocalTransformer(nn.Module):
         self.dynamic_pos_bias = None
         if config.word_encoder.use_dynamic_pos_bias:
             self.dynamic_pos_bias = DynamicPositionBias(
-                dim=config.embedding.embedding_dim // 2, heads=config.word_encoder.heads
+                dim=config.word_encoder.embedding_dim // 2,
+                heads=config.word_encoder.heads,
             )
 
         for _ in range(config.word_encoder.depth):
@@ -33,7 +34,7 @@ class LocalTransformer(nn.Module):
                 nn.ModuleList(
                     [
                         LocalMHA(
-                            dim=config.embedding.embedding_dim,
+                            dim=config.word_encoder.embedding_dim,
                             dim_head=config.word_encoder.head_dim,
                             heads=config.word_encoder.heads,
                             dropout=config.word_encoder.attention_dropout,
@@ -48,7 +49,7 @@ class LocalTransformer(nn.Module):
                             **kwargs
                         ),
                         FeedForward(
-                            dim=config.embedding.embedding_dim,
+                            dim=config.word_encoder.embedding_dim,
                             mult=config.word_encoder.ff_mult,
                             dropout=config.word_encoder.ff_dropout,
                         ),
@@ -57,10 +58,10 @@ class LocalTransformer(nn.Module):
             )
 
         self.to_logits = nn.Sequential(
-            nn.LayerNorm(config.embedding.embedding_dim),
+            nn.LayerNorm(config.word_encoder.embedding_dim),
             nn.Linear(
-                config.embedding.embedding_dim,
-                config.embedding.embedding_dim,
+                config.word_encoder.embedding_dim,
+                config.word_encoder.embedding_dim,
                 bias=False,
             ),
         )
