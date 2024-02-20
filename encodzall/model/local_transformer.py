@@ -17,80 +17,55 @@ def default(val, d):
 
 
 class LocalTransformer(nn.Module):
-    def __init__(
-        self,
-        *,
-        num_tokens,
-        max_seq_len,
-        dim,
-        depth,
-        causal=False,
-        local_attn_window_size=128,
-        dim_head=64,
-        heads=8,
-        ff_mult=4,
-        attn_dropout=0.0,
-        ff_dropout=0.0,
-        ignore_index=-1,
-        use_xpos=False,
-        xpos_scale_base=None,
-        use_dynamic_pos_bias=False,
-        **kwargs
-    ):
+    def __init__(self, config, **kwargs):
         super().__init__()
-        self.token_emb = nn.Embedding(num_tokens, dim)
-        self.pos_emb = nn.Embedding(max_seq_len, dim)
-        self.word_start_emb = nn.Embedding(2, dim)
-        self.word_emb = nn.Embedding(max_seq_len, dim)
-
-        self.max_seq_len = max_seq_len
         self.layers = nn.ModuleList([])
 
-        self.local_attn_window_size = local_attn_window_size
+        self.local_attn_window_size = config.word_encoder.local_attn_window_size
         self.dynamic_pos_bias = None
-        if use_dynamic_pos_bias:
-            self.dynamic_pos_bias = DynamicPositionBias(dim=dim // 2, heads=heads)
+        if config.word_encoder.use_dynamic_pos_bias:
+            self.dynamic_pos_bias = DynamicPositionBias(
+                dim=config.embedding.embedding_dim // 2, heads=config.word_encoder.heads
+            )
 
-        for _ in range(depth):
+        for _ in range(config.word_encoder.depth):
             self.layers.append(
                 nn.ModuleList(
                     [
                         LocalMHA(
-                            dim=dim,
-                            dim_head=dim_head,
-                            heads=heads,
-                            dropout=attn_dropout,
-                            causal=causal,
-                            window_size=local_attn_window_size,
-                            use_xpos=use_xpos,
-                            xpos_scale_base=xpos_scale_base,
-                            use_rotary_pos_emb=not use_dynamic_pos_bias,
-                            prenorm=True,
+                            dim=config.embedding.embedding_dim,
+                            dim_head=config.word_encoder.head_dim,
+                            heads=config.word_encoder.heads,
+                            dropout=config.word_encoder.attention_dropout,
+                            causal=False,
+                            window_size=config.word_encoder.local_attn_window_size,
+                            use_xpos=False,
+                            xpos_scale_base=None,
+                            use_rotary_pos_emb=not config.word_encoder.use_dynamic_pos_bias,
+                            prenorm=config.word_encoder.prenorm,
+                            look_backward=False,
+                            look_forward=True,
                             **kwargs
                         ),
-                        FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
+                        FeedForward(
+                            dim=config.embedding.embedding_dim,
+                            mult=config.word_encoder.ff_mult,
+                            dropout=config.word_encoder.ff_dropout,
+                        ),
                     ]
                 )
             )
 
-        self.ignore_index = ignore_index
         self.to_logits = nn.Sequential(
-            nn.LayerNorm(dim), nn.Linear(dim, num_tokens, bias=False)
+            nn.LayerNorm(config.embedding.embedding_dim),
+            nn.Linear(
+                config.embedding.embedding_dim,
+                config.embedding.embedding_dim,
+                bias=False,
+            ),
         )
 
-    def forward(self, x, mask, word_start):
-        n, device = x.shape[1], x.device
-        x = self.token_emb(x)
-
-        # embed the position of the embedding vector
-        x = x + self.word_start_emb(word_start.long())
-
-        # embed the word positions themselves
-        x = x + self.word_emb(torch.cumsum(word_start.long(), dim=-1))
-
-        assert n <= self.max_seq_len
-        x = x + self.pos_emb(torch.arange(n, device=device))
-
+    def forward(self, x, mask):
         attn_bias = None
         if exists(self.dynamic_pos_bias):
             w = self.local_attn_window_size

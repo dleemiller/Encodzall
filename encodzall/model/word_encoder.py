@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 from .local_transformer import LocalTransformer
+from .word_embedding import WordEmbedding
 from ..utils.gather_vectors import gather_word_starts
 
 
@@ -11,17 +12,11 @@ class WordEncoder(nn.Module):
     from lucidrains.
     """
 
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
 
-        self.word_encoder = LocalTransformer(
-            num_tokens=256,
-            dim=256,
-            depth=6,
-            max_seq_len=8192,
-            local_attn_window_size=64,
-            look_forward=True,
-        )
+        self.word_embedding = WordEmbedding(config)
+        self.word_encoder = LocalTransformer(config)
 
     def forward(self, input_ids, attention_mask, word_start):
         if len(input_ids.shape) == 1:
@@ -30,5 +25,6 @@ class WordEncoder(nn.Module):
             word_start = word_start.unsqueeze(dim=0)
 
         input_ids = input_ids.long()
-        x = self.word_encoder(input_ids, attention_mask, word_start)
+        x = self.word_embedding(input_ids, word_start)
+        x = self.word_encoder(x, attention_mask)
         return gather_word_starts(x, word_start)
