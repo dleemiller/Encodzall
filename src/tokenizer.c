@@ -71,14 +71,17 @@ void adjust_to_max_words(PyObject* words_list, PyObject* word_attention_list, in
     // Pad words_list and word_attention_list to max_words
     if (max_words > 0 && current_words < max_words) {
         PyObject* pad_list = PyList_New(max_length);
+	PyObject* pad_attn = PyList_New(max_length);
         for (int i = 0; i < max_length; ++i) {
-            PyList_SetItem(pad_list, i, PyLong_FromLong(pad_id)); // Reference stolen, no need to Py_DECREF
+            PyList_SetItem(pad_list, i, PyLong_FromLong(pad_id));
+	    PyList_SetItem(pad_attn, i, Py_False);
         }
         while (PyList_Size(words_list) < max_words) {
             PyList_Append(words_list, pad_list);
-            PyList_Append(word_attention_list, Py_False);
+            PyList_Append(word_attention_list, pad_attn);
         }
         Py_DECREF(pad_list); // Cleanup
+	Py_DECREF(pad_attn);
     }
 
     // Truncate words_list and word_attention_list to max_words
@@ -96,20 +99,26 @@ void finalize_and_append_word(PyObject* current_word, PyObject* words_list, int 
     }
 
     // Pad or truncate current_word to max_length
+    PyObject* word_attention = PyList_New(0);
+    while (max_length > 0 && PyList_Size(word_attention) < PyList_Size(current_word)) {
+	PyList_Append(word_attention, Py_True);
+    }
     while (max_length > 0 && PyList_Size(current_word) < max_length) {
         PyList_Append(current_word, PyLong_FromLong(pad_id));
+	PyList_Append(word_attention, Py_False);
     }
     while (max_length > 0 && PyList_Size(current_word) > max_length) {
         PySequence_DelItem(current_word, PyList_Size(current_word) - 1); // Remove last item
+        PySequence_DelItem(word_attention, PyList_Size(word_attention) - 1); // Remove last item
     }
 
     // Append the finalized word to the words list
     PyList_Append(words_list, current_word);
 
     // Update the word attention list
-    PyObject* attention_value = current_word_has_non_pad ? Py_True : Py_False;
-    Py_INCREF(attention_value); // Because PyList_Append steals a reference
-    PyList_Append(word_attention_list, attention_value);
+    //PyObject* attention_value = current_word_has_non_pad ? Py_True : Py_False;
+    //Py_INCREF(attention_value); // Because PyList_Append steals a reference
+    PyList_Append(word_attention_list, word_attention);
 }
 
 

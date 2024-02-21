@@ -18,7 +18,7 @@ class WordEncoder(nn.Module):
         self.word_embedding = WordEmbedding(config)
         self.word_encoder = LocalTransformer(config)
 
-    def forward(self, input_ids, attention_mask, word_start):
+    def forward(self, input_ids, attention_mask, word_start, max_words=None):
         if len(input_ids.shape) == 1:
             input_ids = input_ids.unsqueeze(dim=0)
             attention_mask = attention_mask.unsqueeze(dim=0)
@@ -27,4 +27,4 @@ class WordEncoder(nn.Module):
         input_ids = input_ids.long()
         x = self.word_embedding(input_ids, word_start)
         x = self.word_encoder(x, attention_mask)
-        return gather_word_starts(x, word_start)
+        return gather_word_starts(x, word_start, max_words=max_words)
