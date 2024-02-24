@@ -19,15 +19,13 @@ class Decoder(nn.Module):
 
         self.token_emb = nn.Embedding(self.n_vocab, self.embedding_dim)
         self.pos_emb = nn.Embedding(self.max_word_length + 1, self.embedding_dim)
-        self.embedding_bias = nn.Parameter(torch.zeros(self.embedding_dim))
-        if embed_weight is not None:
-            self.tie_embed_weights(embed_weight)
+        # self.embedding_bias = nn.Parameter(torch.zeros(self.embedding_dim))
         self.register_buffer("bos_idx", torch.Tensor([self.bos_id]))
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.embedding_dim,
-            dim_feedforward=int(config.word_encoder.ff_mult * self.embedding_dim),
-            nhead=config.word_encoder.heads,
+            dim_feedforward=int(config.word_encoder.ff_mult * self.embedding_dim) // 2,
+            nhead=1,
             batch_first=True,
             norm_first=config.word_encoder.prenorm,
             activation="gelu",
@@ -35,14 +33,13 @@ class Decoder(nn.Module):
         )
         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=1)
 
-        self.to_logits = nn.Sequential(
-            nn.LayerNorm(config.word_encoder.embedding_dim),
-            nn.Linear(
-                config.word_encoder.embedding_dim,
-                config.tokenizer.n_vocab,
-                bias=False,
-            ),
+        self.to_logits = nn.Linear(
+            config.word_encoder.embedding_dim,
+            config.tokenizer.n_vocab,
+            bias=False,
         )
+        if embed_weight is not None:
+            self.tie_embed_weights(embed_weight)
 
     @staticmethod
     def generate_square_subsequent_mask(x):
@@ -66,7 +63,7 @@ class Decoder(nn.Module):
 
     def tie_embed_weights(self, embed_weight):
         # decoder is shared with embedding layer
-        self.embedding.word_embeddings.weight = embed_weight
+        self.to_logits.weight = embed_weight
 
     def forward(
         self,
@@ -86,7 +83,7 @@ class Decoder(nn.Module):
         tgt = (
             self.token_emb(shifted_input_ids)
             + self.pos_emb(torch.arange(self.max_word_length + 1, device=device))
-            + self.embedding_bias
+            # + self.embedding_bias
         )
 
         if pad_mask is not None:
@@ -117,4 +114,4 @@ class Decoder(nn.Module):
             input_ids[word_idx].long(),
             ignore_index=self.pad_id,
         )
-        return loss
+        return logits[word_idx].permute(0, 2, 1), input_ids[word_idx], loss

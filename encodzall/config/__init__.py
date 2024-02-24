@@ -27,5 +27,6 @@ def load_config(model_name):
 
 
 load_s = functools.partial(load_config, "encodzall_small")
+load_train = functools.partial(load_config, "train")
 
-__all__ = [load_config, load_s]
+__all__ = [load_config, load_s, load_train]

@@ -24,6 +24,8 @@ def gather_word_starts(
             i, word_starts[i]
         ]  # Gather true positions for the current batch
         true_count = true_positions.size(0)
+        if true_count > max_words:
+            true_count = max_words
 
         # Copy the positions into the 'gathered' tensor and update the mask
         gathered[i, :true_count] = true_positions[:true_count]

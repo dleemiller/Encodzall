@@ -44,8 +44,8 @@ class LocalTransformer(nn.Module):
                             xpos_scale_base=None,
                             use_rotary_pos_emb=not config.word_encoder.use_dynamic_pos_bias,
                             prenorm=config.word_encoder.prenorm,
-                            look_backward=False,
-                            look_forward=True,
+                            look_backward=0,
+                            look_forward=1,
                             **kwargs
                         ),
                         FeedForward(
@@ -56,15 +56,7 @@ class LocalTransformer(nn.Module):
                     ]
                 )
             )
-
-        self.to_logits = nn.Sequential(
-            nn.LayerNorm(config.word_encoder.embedding_dim),
-            nn.Linear(
-                config.word_encoder.embedding_dim,
-                config.word_encoder.embedding_dim,
-                bias=False,
-            ),
-        )
+        self.norm = nn.LayerNorm(config.word_encoder.embedding_dim)
 
     def forward(self, x, mask):
         attn_bias = None
@@ -76,4 +68,4 @@ class LocalTransformer(nn.Module):
             x = attn(x, mask=mask, attn_bias=attn_bias) + x
             x = ff(x) + x
 
-        return self.to_logits(x)
+        return self.norm(x)

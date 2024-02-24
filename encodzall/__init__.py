@@ -42,6 +42,7 @@ class Tokenizer:
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         word_start: torch.Tensor,
+        **kwargs
     ) -> dict[str, torch.Tensor]:
         words, word_attention = tokenizer.make_targets(
             input_ids.tolist(),
