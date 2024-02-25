@@ -8,14 +8,6 @@ from local_attention.local_attention import LocalAttention
 from local_attention.transformer import LocalMHA, FeedForward, DynamicPositionBias
 
 
-def exists(val):
-    return val is not None
-
-
-def default(val, d):
-    return val if exists(val) else d
-
-
 class LocalTransformer(nn.Module):
     def __init__(self, config, **kwargs):
         super().__init__()
@@ -60,7 +52,7 @@ class LocalTransformer(nn.Module):
 
     def forward(self, x, mask):
         attn_bias = None
-        if exists(self.dynamic_pos_bias):
+        if self.dynamic_pos_bias:
             w = self.local_attn_window_size
             attn_bias = self.dynamic_pos_bias(w, w * 2)
 

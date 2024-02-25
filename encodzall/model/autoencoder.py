@@ -25,6 +25,9 @@ class AutoEncoder(nn.Module):
             input_ids, attention_mask, word_start, max_words=self.max_words
         )
         embeddings = self.to_word_batch(embeddings)
+        if kwargs.get("skip_decode", False):
+            return embeddings
+
         target_ids = self.to_word_batch(target_ids)
         target_mask = self.to_word_batch(target_mask)
-        return self.decoder(target_ids, embeddings, target_mask)
+        return self.decoder(target_ids, embeddings, target_mask), embeddings

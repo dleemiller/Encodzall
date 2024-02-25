@@ -101,7 +101,10 @@ class Decoder(nn.Module):
         # decode and produce logits
         logits = self.to_logits(
             self.transformer(
-                tgt, mem, tgt_mask=tgt_mask, tgt_key_padding_mask=pad_mask.logical_not()
+                tgt,
+                mem,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=pad_mask.logical_not().float(),
             )
         )[:, :-1, :]
 

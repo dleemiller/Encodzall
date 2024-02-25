@@ -16,5 +16,5 @@ depth = 4
 local_attn_window_size = 96
 use_dynamic_pos_bias = true
 prenorm = false
-attention_dropout = 0.0
-ff_dropout = 0.0
+attention_dropout = 0.05
+ff_dropout = 0.05
