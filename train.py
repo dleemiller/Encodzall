@@ -86,6 +86,18 @@ def calculate_nll_loss(contrastive_loss, embeds0, embeds1):
     return contrastive_loss(csim, labels)
 
 
+def save_checkpoint(model, optimizer, epoch, loss, hyperparameters, filepath):
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "loss": loss,
+        "tokenizer": vars(arch.tokenizer),
+        "word_encoder": vars(arch.word_encoder),
+    }
+    torch.save(checkpoint, filepath)
+
+
 model = AutoEncoder(arch).to(device)
 model.train()
 optimizer = AdamW(model.parameters(), lr=train.train.learning_rate)
@@ -98,6 +110,7 @@ accuracy = Accuracy(
     num_classes=arch.tokenizer.n_vocab,
 ).cuda()
 
+global_step = 0
 for epoch in range(train.train.epochs):
     accum_loss = 0
     accum_loss_c = 0
@@ -130,7 +143,7 @@ for epoch in range(train.train.epochs):
         acc += accuracy(preds, target)
 
         n = train.train.metrics_steps
-        if step % n == n - 1:
+        if global_step % n == n - 1:
             print(
                 f"Loss ({epoch}:{step}): {accum_loss/n:.3f} contrastive={accum_loss_c/n:.3f}"
             )
@@ -138,3 +151,12 @@ for epoch in range(train.train.epochs):
             accum_loss = 0
             accum_loss_c = 0
             acc = 0
+
+        chkpt = train.train.checkpoint_steps
+        if global_step % chkpt == chkpt - 1:
+            save_checkpoint(
+                model, optimizer, epoch, loss, arch, f"checkpoint_{epoch}_{step}.pth"
+            )
+            exit()
+
+        global_step += 1
