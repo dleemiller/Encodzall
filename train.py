@@ -157,6 +157,5 @@ for epoch in range(train.train.epochs):
             save_checkpoint(
                 model, optimizer, epoch, loss, arch, f"checkpoint_{epoch}_{step}.pth"
             )
-            exit()
 
         global_step += 1

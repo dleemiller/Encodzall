@@ -18,3 +18,10 @@ use_dynamic_pos_bias = true
 prenorm = false
 attention_dropout = 0.05
 ff_dropout = 0.05
+
+[context_encoder]
+heads = 8
+ff_mult = 8
+depth = 2
+prenorm = true
+attention_dropout = 0.05
