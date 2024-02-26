@@ -98,6 +98,8 @@ def save_checkpoint(model, optimizer, epoch, loss, hyperparameters, filepath):
     torch.save(checkpoint, filepath)
 
 
+from torch.cuda.amp import autocast, GradScaler
+
 model = AutoEncoder(arch).to(device)
 model.train()
 optimizer = AdamW(model.parameters(), lr=train.train.learning_rate)
@@ -110,6 +112,9 @@ accuracy = Accuracy(
     num_classes=arch.tokenizer.n_vocab,
 ).cuda()
 
+# Initialize the gradient scaler
+scaler = GradScaler()
+
 global_step = 0
 for epoch in range(train.train.epochs):
     accum_loss = 0
@@ -121,25 +126,33 @@ for epoch in range(train.train.epochs):
             k: v.to(device) for k, v in batch.items() if k not in (text_col, "noise")
         }
         optimizer.zero_grad()
-        reconstructive, embed0 = model(**batch)
-        preds, target, loss = reconstructive
-        if train.train.contrastive:
-            with torch.no_grad():
-                embed1 = model(
-                    input_ids=batch["clean_input_ids"],
-                    attention_mask=batch["clean_attention_mask"],
-                    word_start=batch["clean_word_start"],
-                    target_ids=None,
-                    target_mask=None,
-                    skip_decode=True,
-                )
-            loss_c = calculate_nll_loss(contrastive_loss, embed0, embed1)
-            accum_loss_c += loss_c.item()
-            (loss + loss_c).backward()
-        else:
-            loss.backward()
-        optimizer.step()
+
+        # Run the forward pass under autocast
+        with autocast():
+            reconstructive, embed0 = model(**batch)
+            preds, target, loss = reconstructive
+            if train.train.contrastive:
+                with torch.no_grad():
+                    embed1 = model(
+                        input_ids=batch["clean_input_ids"],
+                        attention_mask=batch["clean_attention_mask"],
+                        word_start=batch["clean_word_start"],
+                        target_ids=None,
+                        target_mask=None,
+                        skip_decode=True,
+                    )
+                loss_c = calculate_nll_loss(contrastive_loss, embed0, embed1)
+                total_loss = loss + loss_c
+            else:
+                total_loss = loss
+
+        scaler.scale(total_loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
         accum_loss += loss.item()
+        if train.train.contrastive:
+            accum_loss_c += loss_c.item()
         acc += accuracy(preds, target)
 
         n = train.train.metrics_steps

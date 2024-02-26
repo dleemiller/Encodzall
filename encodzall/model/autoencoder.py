@@ -68,5 +68,4 @@ class AutoEncoder(nn.Module):
         preds, target, loss = self.decoder(target_ids, embeddings, target_mask)
 
         en_loss = self.elasticnet_loss(context)
-        print(f"Reconstructive loss: {loss:.2f}, EN Loss: {en_loss:.2f}")
         return (preds, target, loss + en_loss), embeddings

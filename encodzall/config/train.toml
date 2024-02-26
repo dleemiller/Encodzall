@@ -1,5 +1,5 @@
 [train]
-batch_size = 2
+batch_size = 16
 learning_rate = 1e-4
 learning_rate_decay = 0.99998
 epochs = 2
@@ -10,9 +10,10 @@ contrastive = true
 noise_probability = 0.5
 
 [data]
-huggingface_id = "Trelis/tiny-shakespeare"
+#huggingface_id = "Trelis/tiny-shakespeare"
 #huggingface_id = "cerebras/SlimPajama-627B"
-text_col = "Text"
+huggingface_id = "rokset3/slim_pajama_chunk1"
+text_col = "text"
 streaming = true
 num_workers = 1
 pin_memory = false
