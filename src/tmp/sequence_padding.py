@@ -2,19 +2,17 @@ import torch
 from torch import nn
 
 
-class LearnedPadding(nn.Module):
+class ZeroPadding(nn.Module):
     def __init__(self, d_model: int):
         """
-        Initializes the LearnedPadding module.
+        Initializes the ZeroPadding module.
 
         Args:
             d_model (int): Dimension of the word vectors.
         """
-        super(LearnedPadding, self).__init__()
-        # Initialize the padding vector as a learnable parameter
-        self.padding_vector = nn.Parameter(
-            torch.randn(d_model)
-        )  # Initialized with random values
+        super(ZeroPadding, self).__init__()
+        padding_vector = torch.zeros(d_model, requires_grad=False)
+        self.register_buffer("padding_vector", padding_vector)
 
     def forward(
         self, batch_pooled_vectors: list[torch.Tensor]

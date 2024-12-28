@@ -3,9 +3,8 @@ import torch.nn as nn
 import math
 from typing import List, Tuple
 
-# Assuming ByteLevelTokenizer is defined in tokenizer.py
-from tokenizer import ByteLevelTokenizer
-from sequence_padding import LearnedPadding
+from encoder import TransformerEncoder
+from unpad_sequences import UnpadSequences
 
 
 class WordPooling(nn.Module):
@@ -40,18 +39,21 @@ class WordPooling(nn.Module):
         pooled_words = []
 
         for batch_idx, boundaries in enumerate(word_boundaries):
-            print(batch_idx, boundaries)
-            for start, end in boundaries:
-                word_vectors = hidden_states[
-                    batch_idx, start:end, :
-                ]  # Shape: (word_len, hidden_dim)
-                if word_vectors.size(0) == 0:
-                    continue  # Skip if no vectors to pool
-                if self.pooling_type == "average":
-                    pooled = word_vectors.mean(dim=0)
-                else:
-                    pooled, _ = word_vectors.max(dim=0)
-                pooled_words.append(pooled)
+            try:
+                for start, end in boundaries:
+                    word_vectors = hidden_states[
+                        batch_idx, start:end, :
+                    ]  # Shape: (word_len, hidden_dim)
+                    if word_vectors.size(0) == 0:
+                        continue  # Skip if no vectors to pool
+                    if self.pooling_type == "average":
+                        pooled = word_vectors.mean(dim=0)
+                    else:
+                        pooled, _ = word_vectors.max(dim=0)
+                    pooled_words.append(pooled)
+            except Exception as e:
+                print(boundaries)
+                raise e
 
         if pooled_words:
             return torch.stack(pooled_words, dim=0)  # Shape: (total_words, hidden_dim)
@@ -61,18 +63,53 @@ class WordPooling(nn.Module):
             )  # Return empty tensor if no words
 
 
-class TransformerEncoderModule(nn.Module):
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int):
+        """
+        Sinusoidal positional encoding module.
+
+        Args:
+            d_model (int): Dimension of the embeddings.
+        """
+        super(SinusoidalPositionalEncoding, self).__init__()
+        self.d_model = d_model
+
+    def forward(self, seq_length: int, device: torch.device) -> torch.Tensor:
+        """
+        Generate positional encodings for a sequence length.
+
+        Args:
+            seq_length (int): Length of the input sequence.
+            device (torch.device): Device where the tensor will be placed.
+
+        Returns:
+            torch.Tensor: Positional encoding tensor of shape (seq_length, d_model).
+        """
+        position = torch.arange(
+            seq_length, dtype=torch.float32, device=device
+        ).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, dtype=torch.float32, device=device)
+            * -(math.log(10000.0) / self.d_model)
+        )
+        pos_encoding = torch.zeros((seq_length, self.d_model), device=device)
+        pos_encoding[:, 0::2] = torch.sin(position * div_term)
+        pos_encoding[:, 1::2] = torch.cos(position * div_term)
+        return pos_encoding
+
+
+class WordTransformer(nn.Module):
     def __init__(
         self,
         vocab_size: int = 256,
         d_model: int = 512,
         nhead: int = 8,
-        num_layers: int = 2,
+        num_encoder_layers: int = 2,
+        num_decoder_layers: int = 2,
+        activation="gelu",
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
-        max_seq_length: int = 512,
-        activation: str = "gelu",
-        batch_first: bool = True,
+        max_seq_length: int = 768,
         pooling_type: str = "average",
     ):
         """
@@ -90,7 +127,7 @@ class TransformerEncoderModule(nn.Module):
             batch_first (bool): If True, input and output tensors are (batch, seq, feature). Default is True.
             pooling_type (str): Type of pooling to perform ('average' or 'max'). Default is 'average'.
         """
-        super(TransformerEncoderModule, self).__init__()
+        super(WordTransformer, self).__init__()
         self.d_model = d_model
         self.max_seq_length = max_seq_length
 
@@ -98,153 +135,113 @@ class TransformerEncoderModule(nn.Module):
 
         # Embedding layer
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        self.encoder = TransformerEncoder(
+            d_model,
+            nhead,
+            num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
 
-        # Initialize Transformer Encoder
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Decoder
+        decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation=activation,
-            batch_first=batch_first,
+            batch_first=True,
+            norm_first=True,
         )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer, num_layers=num_layers
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer, num_layers=num_decoder_layers
         )
+
+        # Positional encodings for target sequences
+        self.positional_encoding = SinusoidalPositionalEncoding(d_model)
 
         # Initialize WordPooling
         self.word_pooling = WordPooling(pooling_type=pooling_type)
+        self.unpad_sequences = UnpadSequences()
+        self.output_layer = nn.Linear(d_model, vocab_size)
 
     def forward(
         self,
         x: torch.Tensor,
+        sequence_ids: torch.Tensor,
+        target_ids: torch.Tensor,
+        target_key_padding_mask: torch.Tensor,
         attention_mask: torch.Tensor = None,
         word_boundaries: List[List[Tuple[int, int]]] = None,
     ) -> torch.Tensor:
         """
-        Forward pass of the TransformerEncoderModule with WordPooling.
+        Forward pass of the Transformer.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_length) with token indices.
-            attention_mask (torch.Tensor, optional): Attention mask of shape (batch_size, seq_length, seq_length),
-                                                    where `True` indicates positions to be masked.
-            word_boundaries (List[List[Tuple[int, int]]], optional):
-                List of word boundaries per batch. Each element corresponds to a batch element and contains
-                a list of (start, end) tuples indicating the token indices for each word.
+            sequence_ids (torch.Tensor): Sequence IDs for unpadding.
+            target_ids (torch.Tensor): Target tensor of shape (batch_size, target_seq_length) with token indices.
+            attention_mask (torch.Tensor, optional): Attention mask for encoder of shape (batch_size, seq_length, seq_length).
+            word_boundaries (List[List[Tuple[int, int]]], optional): Word boundaries for word pooling.
 
         Returns:
-            torch.Tensor: Tensor of shape (total_words, hidden_dim) containing pooled word vectors.
+            torch.Tensor: Output tensor from the decoder.
         """
         batch_size, seq_length = x.size()
 
-        # Step 1: Embed the input tokens
         # Shape: (batch_size, seq_length, d_model)
         embedded = self.embedding(x.long()) * math.sqrt(self.d_model)
+        transformer_output = self.encoder(embedded, attention_mask)
 
-        # Step 2: Apply Rotary Positional Encoding (RoPE)
-        # Shape: (batch_size, seq_length, d_model)
-        embedded = self.apply_rope(embedded)
-
-        # Step 3: Pass through Transformer Encoder with per-sample attention masks
-        transformer_outputs = []
-        for i in range(batch_size):
-            if attention_mask is not None:
-                mask = attention_mask[i]  # Shape: (seq_length, seq_length)
-                # Ensure mask is on the same device and dtype as embedded
-                mask = mask.to(dtype=torch.bool, device=embedded.device)
-            else:
-                mask = None
-
-            # TransformerEncoder expects input of shape (batch_size, seq_length, d_model) if batch_first=True
-            # Here, we process one sample at a time
-            output = self.transformer_encoder(
-                embedded[i].unsqueeze(0), mask=mask
-            )  # Shape: (1, seq_length, d_model)
-            transformer_outputs.append(output)
-
-        # Concatenate outputs: (batch_size, seq_length, d_model)
-        transformer_output = torch.cat(transformer_outputs, dim=0)
-
-        # Step 4: Apply Word Pooling
         # pooled_word_vectors shape: (total_words, hidden_dim)
         pooled_word_vectors = self.word_pooling(transformer_output, word_boundaries)
 
-        return pooled_word_vectors
+        # arrange to block vector
+        memory, memory_key_padding_mask = self.unpad_sequences(
+            pooled_word_vectors, sequence_ids
+        )
+        memory.contiguous()
 
-    def apply_rope(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Applies Rotary Positional Encoding (RoPE) to the input embeddings.
-
-        Args:
-            x (torch.Tensor): Embedded input tensor of shape (batch_size, seq_length, d_model).
-
-        Returns:
-            torch.Tensor: RoPE-enhanced embeddings of shape (batch_size, seq_length, d_model).
-        """
-        batch_size, seq_length, d_model = x.size()
-        if seq_length > self.max_seq_length:
-            raise ValueError(
-                f"Sequence length {seq_length} exceeds maximum {self.max_seq_length}"
-            )
-
-        # Create position indices
-        position = torch.arange(
-            seq_length, dtype=torch.float, device=x.device
-        ).unsqueeze(
-            1
-        )  # (seq_length, 1)
-
-        # Compute the rotary frequencies
-        inv_freq = 1.0 / (
-            10000 ** (torch.arange(0, d_model, 2, device=x.device).float() / d_model)
-        )  # (d_model/2,)
-
-        # Compute the sinusoidal embeddings
-        sinusoid_inp = position * inv_freq  # (seq_length, d_model/2)
-        sin = torch.sin(sinusoid_inp)  # (seq_length, d_model/2)
-        cos = torch.cos(sinusoid_inp)  # (seq_length, d_model/2)
-
-        # Expand to match batch size
-        sin = sin.unsqueeze(0).repeat(
-            batch_size, 1, 1
-        )  # (batch_size, seq_length, d_model/2)
-        cos = cos.unsqueeze(0).repeat(
-            batch_size, 1, 1
-        )  # (batch_size, seq_length, d_model/2)
-
-        # Split the embedding into even and odd parts
-        x1 = x[:, :, 0::2]  # (batch_size, seq_length, d_model/2)
-        x2 = x[:, :, 1::2]  # (batch_size, seq_length, d_model/2)
-
-        # Apply RoPE
-        x_rotated = x1 * cos - x2 * sin  # (batch_size, seq_length, d_model/2)
-        x2_new = x1 * sin + x2 * cos  # (batch_size, seq_length, d_model/2)
-
-        # Interleave the rotated components
-        x = torch.stack((x_rotated, x2_new), dim=-1).reshape(
-            batch_size, seq_length, d_model
+        # Decoder
+        target_seq_length = target_ids.size(1)
+        target_embedded = self.embedding(target_ids.long()) + self.positional_encoding(
+            seq_length=target_seq_length, device=target_ids.device
         )
 
-        return x
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(
+            target_seq_length
+        ).to(target_ids.device)
+        decoder_output = self.decoder(
+            tgt=target_embedded,
+            memory=memory,
+            tgt_is_causal=True,
+            tgt_mask=causal_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+            tgt_key_padding_mask=target_key_padding_mask,
+        )
+
+        return self.output_layer(decoder_output)
 
 
 # Example Usage
 if __name__ == "__main__":
+    from tokenizer import ByteLevelTokenizer
+
     # Initialize the tokenizer and pooling module
     tokenizer = ByteLevelTokenizer(max_sequence_length=64)
     pooling_type = "average"  # Change to 'max' for max pooling
 
     # Initialize the Transformer Encoder with WordPooling
-    model = TransformerEncoderModule(
+    model = WordTransformer(
         vocab_size=256,
         d_model=512,
         nhead=8,
-        num_layers=6,
+        num_encoder_layers=2,
+        num_decoder_layers=2,
         dim_feedforward=2048,
         dropout=0.1,
         max_seq_length=512,
-        activation="relu",
-        batch_first=True,
+        activation="gelu",
         pooling_type=pooling_type,
     )
 
@@ -262,36 +259,49 @@ if __name__ == "__main__":
         "Tokenize the input text into byte token IDs and create the corresponding attention mask."
         "Assuming tokenizer.tokenize returns tokens as a list of lists for batch processing"
     )
+    target_ids, target_key_padding_mask = tokenizer.create_targets(
+        [sample_text1, sample_text2]
+    )
 
     batch = []
-    for text in [sample_text1, sample_text2]:
+    tokens = []
+    mask = []
+    boundaries = []
+    sequence_ids = []
+    for i, text in enumerate([sample_text1, sample_text2]):
         # Tokenize the sample text
-        tokens, mask, boundaries = tokenizer.tokenize(text)
-        print(f"Token IDs:\n{tokens}\nToken IDs shape: {tokens.shape}")
-        print(f"\nAttention Mask:\n{mask}\nMask Shape: {mask.shape}")
-        print(f"\nWord Boundaries:\n {boundaries}")
+        tokens_i, mask_i, boundaries_i = tokenizer.tokenize(text)
+        print(f"Token IDs:\n{tokens_i}\nToken IDs shape: {tokens_i.shape}")
+        print(f"\nAttention Mask:\n{mask_i}\nMask Shape: {mask_i.shape}")
+        print(f"\nWord Boundaries:\n {boundaries_i}")
 
-        # Convert tokens and mask to tensors
-        # Assuming tokenizer.tokenize returns tokens as a list of lists for batch processing
-        # Here, we create a batch size of 1 for demonstration
-        tokens_tensor = tokens.to(device)  # Shape: (batch_size, seq_length)
-        attention_mask_tensor = mask.to(device)  # Shape: (seq_length, seq_length)
-        word_boundaries_list = boundaries
+        tokens.append(tokens_i)
+        mask.append(mask_i)
+        boundaries.extend(boundaries_i)
+        sequence_ids.extend([i] * sum([len(x) for x in boundaries_i]))
 
-        # Forward pass through the model
-        pooled_word_vectors = model(
-            tokens_tensor,
-            attention_mask=attention_mask_tensor,
-            word_boundaries=word_boundaries_list,
-        )
+    # Convert tokens and mask to tensors
+    tokens_tensor = torch.cat(tokens, dim=0).to(
+        device
+    )  # Shape: (batch_size, seq_length)
+    attention_mask_tensor = torch.cat(mask, dim=0).to(
+        device
+    )  # Shape: (seq_length, seq_length)
+    sequence_ids = torch.tensor(sequence_ids).to(device)
+    target_ids = target_ids.to(device)
+    target_key_padding_mask = target_key_padding_mask.to(device)
+    word_boundaries_list = boundaries
+    print(tokens_tensor.shape, attention_mask_tensor.shape)
+    print("Sequences: ", sequence_ids, sequence_ids.shape)
 
-        print("\nPooled Word Vectors Shape:", pooled_word_vectors.shape)
-        print("\nPooled Word Vectors:\n", pooled_word_vectors)
-        batch.append(pooled_word_vectors)
+    # Forward pass through the model
+    output = model(
+        tokens_tensor,
+        sequence_ids=sequence_ids,
+        target_ids=target_ids,
+        target_key_padding_mask=target_key_padding_mask,
+        attention_mask=attention_mask_tensor,
+        word_boundaries=word_boundaries_list,
+    )
 
-    padder = LearnedPadding(d_model=512).to(device)
-    padded_seq, mem_key_mask = padder(batch)
-    print(padded_seq.shape)
-    # Optionally, decode the tokens to verify correctness
-    decoded_text = tokenizer.decode(tokens)
-    print("\nDecoded Text:\n", decoded_text)
+    print(output)

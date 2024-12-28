@@ -40,6 +40,7 @@ class WordPooling(nn.Module):
         pooled_words = []
 
         for batch_idx, boundaries in enumerate(word_boundaries):
+            batch = []
             for start, end in boundaries:
                 word_vectors = hidden_states[
                     batch_idx, start:end, :
@@ -50,43 +51,8 @@ class WordPooling(nn.Module):
                     pooled = word_vectors.mean(dim=0)
                 else:
                     pooled, _ = word_vectors.max(dim=0)
-                pooled_words.append(pooled)
 
-        if pooled_words:
-            return torch.stack(pooled_words, dim=0)  # Shape: (total_words, hidden_dim)
-        else:
-            return torch.empty(
-                0, hidden_states.size(-1)
-            )  # Return empty tensor if no words
+                batch.append(pooled)
+            pooled_words.append(batch)
 
-
-if __name__ == "__main__":
-    # Initialize the tokenizer and pooling module
-    tokenizer = ByteLevelTokenizer(max_sequence_length=64)
-    pooling_module = WordPooling(
-        pooling_type="average"
-    )  # Change to 'max' for max pooling
-
-    # Sample text
-    sample_text = "Hello world! This is a sample text to encode. Tokenize the input text into byte token IDs and create the corresponding attention mask."
-
-    # Tokenize the sample text
-    tokens, mask, boundaries = tokenizer.tokenize(sample_text)
-    print("Token IDs:\n", tokens)
-    print("\nAttention Mask:\n", mask)
-
-    # Simulate hidden states (e.g., from Encoder 1)
-    # For demonstration, we'll use random vectors
-    hidden_dim = 16
-    hidden_states = torch.randn(tokens.size(0), tokens.size(1), hidden_dim)
-
-    # Perform pooling
-    pooled_word_vectors = pooling_module(
-        hidden_states.to("cuda"), mask.to("cuda"), boundaries
-    )
-    print("\nPooled Word Vectors Shape:", pooled_word_vectors.shape)
-    print("\nPooled Word Vectors:\n", pooled_word_vectors)
-
-    # Decode the tokens to verify correctness
-    decoded_text = tokenizer.decode(tokens)
-    print("\nDecoded Text:\n", decoded_text)
+        return torch.nested.nested_tensor(pooled_words)

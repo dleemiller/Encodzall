@@ -40,7 +40,9 @@ class ByteLevelTokenizer:
         Example:
             "Hello world! " -> ["Hello ", "world! "]
         """
-        return list(more_itertools.split_after(text, lambda s: s.isspace()))
+        return list(
+            map("".join, more_itertools.split_after(text, lambda s: s.isspace()))
+        )
 
     def encode_words(
         self, words: List[str], target_min_len: int = 8
@@ -50,7 +52,7 @@ class ByteLevelTokenizer:
         """
         byte_sequences = []
         for word in words:
-            byte_seq = [ord(c) for c in word]
+            byte_seq = list(bytearray(word.encode("utf-8")))
             byte_sequences.append(byte_seq)
 
         byte_sequences = list(
@@ -58,7 +60,7 @@ class ByteLevelTokenizer:
                 byte_sequences, max_size=target_min_len, get_len=len, strict=False
             )
         )
-        return [list(more_itertools.flatten(x)) for x in byte_sequences]
+        return [list(more_itertools.flatten(x)) for x in byte_sequences][0:512]
 
     def pack_sequences(
         self, byte_sequences: List[List[int]]
@@ -136,9 +138,8 @@ class ByteLevelTokenizer:
         # Step 3: Pack byte sequences into fixed-length sequences
         packed_sequences, word_boundaries_list = self.pack_sequences(byte_sequences)
         # Step 4: Convert packed sequences to tensor
-        token_tensor = torch.tensor(
-            packed_sequences, dtype=torch.uint8
-        )  # Using uint8 for memory efficiency
+        token_tensor = torch.tensor(packed_sequences, dtype=torch.uint8)
+
         # Step 5: Create attention masks
         attention_mask = self.create_attention_mask(word_boundaries_list)
         return token_tensor, attention_mask, word_boundaries_list
@@ -154,15 +155,26 @@ class ByteLevelTokenizer:
                 continue  # Skip special tokens
             decoded_bytes.append(token_id)
         bytes_seq = bytes(decoded_bytes)
-        return bytes_seq.decode(
-            "latin1"
-        )  # Using 'latin1' to map bytes directly to characters
+        return bytes_seq.decode("latin1")
 
     def get_special_tokens(self) -> dict:
         """
         Retrieve the mapping of special tokens.
         """
         return self.special_bytes
+
+    def create_targets(self, texts: list[str]) -> torch.Tensor:
+        target_ids = []
+        for t in texts:
+            words = self.split_text(t)
+            ids = list(more_itertools.flatten(self.encode_words(words)))
+            target_ids.append(ids)
+        nested_tensor = torch.nested.nested_tensor(
+            [torch.tensor([BOS_BYTE] + t, dtype=torch.uint8) for t in target_ids]
+        )
+        padded_targets = nested_tensor.to_padded_tensor(padding=PAD_BYTE)
+        key_padding_mask = padded_targets == PAD_BYTE
+        return padded_targets, key_padding_mask
 
 
 # Example usage
