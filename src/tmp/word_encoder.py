@@ -220,7 +220,10 @@ class WordTransformer(nn.Module):
             tgt_key_padding_mask=target_key_padding_mask,
         )
 
-        return self.output_layer(decoder_output)
+        logits = self.output_layer(decoder_output)
+        print(target_ids[:, 1:])
+        print(torch.argmax(logits, dim=-1)[:, :-1], logits.shape)
+        return logits[:, :-1, :].contiguous()
 
 
 # Example Usage

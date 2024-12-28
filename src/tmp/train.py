@@ -12,7 +12,7 @@ from tqdm import tqdm
 import math
 
 from word_encoder import WordTransformer
-from tokenizer import ByteLevelTokenizer
+from tokenizer import ByteLevelTokenizer, PAD_BYTE
 
 
 # Define the training loop
@@ -39,7 +39,7 @@ def train(
     )
 
     # Define loss function
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(ignore_index=PAD_BYTE)
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
@@ -50,21 +50,29 @@ def train(
         ):
             # Tokenize the input and create attention masks
             texts = batch["text"]
-            token_ids, attention_masks, word_boundaries, sequence_ids = [], [], [], []
+            token_ids, attention_masks, word_boundaries, sequence_ids, target_ids = (
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
             for j, text in enumerate(texts):
-                tokens, mask, boundaries = tokenizer.tokenize(text)
+                tokens, mask, boundaries, targets = tokenizer.tokenize(text)
                 token_ids.append(tokens)
                 attention_masks.append(mask)
                 word_boundaries.extend(boundaries)
+                target_ids.append(targets)
                 sequence_ids.extend([j] * sum([len(x) for x in boundaries]))
 
             tokens_tensor = torch.cat(token_ids).to(device)
             attention_mask_tensor = torch.cat(attention_masks).to(device)
 
-            # Generate target IDs for reconstruction
-            target_ids, target_key_padding_mask = tokenizer.create_targets(texts)
+            # Generate target masks for reconstruction
+            target_ids, target_key_padding_mask = tokenizer.pad_targets(target_ids)
             target_ids = target_ids.to(device)
             target_key_padding_mask = target_key_padding_mask.to(device)
+            print(target_ids.shape)
 
             # Forward pass
             optimizer.zero_grad()
@@ -77,7 +85,10 @@ def train(
                     attention_mask=attention_mask_tensor,
                     word_boundaries=word_boundaries,
                 )
-                loss = loss_fn(output.view(-1, output.size(-1)), target_ids.view(-1))
+                loss = loss_fn(
+                    output.view(-1, output.size(-1)),
+                    target_ids[:, 1:].contiguous().view(-1),
+                )
 
             # Backward pass
             scaler.scale(loss).backward()
@@ -98,7 +109,7 @@ def train(
 if __name__ == "__main__":
     # Configurations
     num_epochs = 3
-    batch_size = 16
+    batch_size = 64
     learning_rate = 5e-4
     warmup_steps = 1000
     output_dir = "./checkpoints"
@@ -112,13 +123,12 @@ if __name__ == "__main__":
     tokenizer = ByteLevelTokenizer(max_sequence_length=max_sequence_length)
     model = WordTransformer(
         vocab_size=256,
-        d_model=512,
-        nhead=8,
-        num_encoder_layers=2,
-        num_decoder_layers=2,
+        d_model=384,
+        nhead=6,
+        num_encoder_layers=3,
+        num_decoder_layers=3,
         dim_feedforward=2048,
         dropout=0.1,
-        max_seq_length=512,
         pooling_type="average",
     )
 
