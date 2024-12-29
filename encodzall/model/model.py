@@ -68,8 +68,7 @@ class Encodzall(nn.Module):
         )
 
         # Positional encodings for memory and target sequences
-        self.positional_encoding_memory = SinusoidalPositionalEncoding(self.d_model)
-        self.positional_encoding_target = SinusoidalPositionalEncoding(self.d_model)
+        self.positional_encoding = SinusoidalPositionalEncoding(self.d_model)
 
         # Word pooling and unpadding
         self.word_pooling = WordPooling(pooling_type=config.pooling_type)
@@ -116,26 +115,21 @@ class Encodzall(nn.Module):
         )  # Shape: (total_words, d_model)
 
         # Unpad sequences to form memory
-        memory, memory_key_padding_mask = self.unpad_sequences(
+        encoder1_output, memory_key_padding_mask = self.unpad_sequences(
             pooled_word_vectors, sequence_ids
-        )
-        mem_seq_length = memory.size(1)
-
-        # Apply positional encoding to memory
-        memory += self.positional_encoding_memory(
-            seq_length=mem_seq_length, device=device
         )
 
         # Pass through the second encoder
-        encoder2_output = self.encoder2(
-            memory, attn_mask=memory_key_padding_mask.unsqueeze(1) == 0
+        memory = self.encoder2(
+            encoder1_output, attn_mask=memory_key_padding_mask.unsqueeze(1) == 0
         )
+        memory += self.positional_encoding(seq_length=memory.size(1), device=device)
 
         # Embed target tokens
         target_embedded = self.embedding(
             target_ids.long()
         )  # Shape: (batch_size, target_seq_length, d_model)
-        target_embedded += self.positional_encoding_target(
+        target_embedded += self.positional_encoding(
             seq_length=target_ids.size(1), device=device
         )
 
@@ -147,7 +141,7 @@ class Encodzall(nn.Module):
         # Pass through the decoder
         decoder_output = self.decoder(
             tgt=target_embedded,
-            memory=encoder2_output,
+            memory=memory,
             tgt_mask=causal_mask,
             memory_key_padding_mask=memory_key_padding_mask,
             tgt_key_padding_mask=target_key_padding_mask,
