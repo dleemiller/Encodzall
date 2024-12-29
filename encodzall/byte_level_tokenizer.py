@@ -5,6 +5,9 @@ import itertools
 import more_itertools
 from string_noise import noise
 
+from .config.noise_config import NoiseConfig
+
+
 # Define special tokens using C1 control characters (bytes 128-159)
 PAD_BYTE = 0x80  # <PAD>
 MASK_BYTE = 0x81  # <MASK>
@@ -40,8 +43,9 @@ class ByteLevelTokenizer:
         token_to_byte (dict): Reverse mapping for decoding from special tokens to byte values.
     """
 
-    def __init__(self, max_sequence_length: int = 64):
+    def __init__(self, max_sequence_length: int = 64, noise_config: NoiseConfig = None):
         self.max_sequence_length = max_sequence_length
+        self.noise_config = noise_config if noise_config else NoiseConfig()
 
         # Setup special tokens
         self.special_bytes: dict[int, str] = SPECIAL_BYTES
@@ -313,7 +317,8 @@ class ByteLevelTokenizer:
             words = words[:truncate_len]
 
         # 4) Optionally apply noise
-        if noise_prob > 0:
+        if noise_prob or self.noise_config.noise_prob:
+            noise_prob = max(noise_prob, self.noise_config.noise_prob)
             assert 0 <= noise_prob <= 1
             noised_words = self.apply_noise_to_words(words, noise_prob=noise_prob)
         else:
@@ -324,7 +329,9 @@ class ByteLevelTokenizer:
 
         # 6) Pack these sequences
         packed_sequences, word_boundaries_list = self.pack_sequences(
-            byte_sequences_noised, mask_prob=mask_prob, add_eos=add_eos
+            byte_sequences_noised,
+            mask_prob=mask_prob or self.noise_config.mask_prob,
+            add_eos=add_eos,
         )
 
         # Convert to Torch
