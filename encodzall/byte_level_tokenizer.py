@@ -308,7 +308,9 @@ class ByteLevelTokenizer:
         words = self.split_text(text)
 
         # limit characters
-        word_len = list(itertools.accumulate(map(len, words)))
+        word_len = list(
+            itertools.accumulate(map(lambda x: len(x.encode("utf-8")), words))
+        )
         max_idx = max([i for i, x in enumerate(word_len) if x < char_len])
         words = words[0 : max_idx + 1]
 
