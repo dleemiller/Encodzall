@@ -1,174 +1,250 @@
+# train.py
+import os
+import json
+import math
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
+from transformers import get_cosine_schedule_with_warmup
 from datasets import load_dataset
-from torch import nn
-from torch.utils.data import DataLoader
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ExponentialLR, OneCycleLR
-from torchmetrics import Accuracy
+from tqdm import tqdm
+from typing import List, Tuple, Optional
 
-from encodzall import Tokenizer
-from encodzall.config import load_s, load_train
-from encodzall.model.autoencoder import AutoEncoder
-
-from string_noise import noise
+# Import configurations and modules
+from encodzall import TrainingConfig, encodzall_s, encodzall_m, encodzall_l
+from encodzall import Encodzall
+from encodzall import ByteLevelTokenizer, PAD_BYTE
 
 
-# init
-train = load_train()
-text_col = train.data.text_col
-arch = load_s()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-Tokenizer.init(arch)
+def set_seed(seed: int):
+    """Set seed for reproducibility."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-def cos_sim(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def load_token_weights(filepath: str, device: torch.device) -> torch.Tensor:
+    """Load token weights from a JSON file."""
+    with open(filepath, "r") as fh:
+        weights = json.load(fh)
+        idx, weight = zip(*sorted(weights.items()))
+        weight = torch.tensor(weight, dtype=torch.float32).to(device)
+    return weight
+
+
+def prepare_batch(
+    batch: dict,
+    tokenizer: ByteLevelTokenizer,
+    config: TrainingConfig,
+    device: torch.device,
+):
     """
-    Computes the cosine similarity cos_sim(a[i], b[j]) for all i and j.
-    :return: Matrix with res[i][j]  = cos_sim(a[i], b[j])
+    Tokenize and pad the batch data.
+
+    Args:
+        batch (dict): Batch data from the dataset.
+        tokenizer (ByteLevelTokenizer): Tokenizer instance.
+        config (TrainingConfig): Training configuration.
+        device (torch.device): Device to place tensors.
+
+    Returns:
+        Tuple containing token_ids, attention_masks, word_boundaries, sequence_ids, target_ids, target_key_padding_mask
     """
-    a_norm = nn.functional.normalize(a, p=2, dim=1)
-    b_norm = nn.functional.normalize(b, p=2, dim=1)
-    return torch.mm(a_norm, b_norm.transpose(0, 1))
+    texts = batch["text"]
+    token_ids, attention_masks, word_boundaries, sequence_ids, target_ids = (
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
+
+    for j, text in enumerate(texts):
+        tokens, mask, boundaries, targets = tokenizer.tokenize(text)
+        token_ids.append(tokens)
+        attention_masks.append(mask)
+        word_boundaries.extend(boundaries)
+        target_ids.append(targets)
+        sequence_ids.extend([j] * sum([len(x) for x in boundaries]))
+
+    tokens_tensor = torch.cat(token_ids).to(device)
+    attention_mask_tensor = torch.cat(attention_masks).to(device)
+
+    # Generate target masks for reconstruction
+    target_ids, target_key_padding_mask = tokenizer.pad_targets(target_ids)
+    target_ids = target_ids.to(device)
+    target_key_padding_mask = target_key_padding_mask.to(device)
+
+    return (
+        tokens_tensor,
+        attention_mask_tensor,
+        word_boundaries,
+        sequence_ids,
+        target_ids,
+        target_key_padding_mask,
+    )
 
 
-def build_dataloader():
-    dataset = load_dataset(train.data.huggingface_id, streaming=train.data.streaming)
-    trainset = dataset["train"].select_columns([text_col])
+def train(
+    model: nn.Module,
+    tokenizer: ByteLevelTokenizer,
+    dataset,
+    config: TrainingConfig,
+    device: torch.device,
+):
+    """
+    Define the training loop.
 
-    # add noise
-    trainset = trainset.map(
-        lambda t: {
-            "noise": noise.moe(
-                t.get(text_col), probability=train.train.noise_probability
+    Args:
+        model (nn.Module): The Encodzall model.
+        tokenizer (ByteLevelTokenizer): The tokenizer.
+        dataset: The training dataset.
+        config (TrainingConfig): Training hyperparameters.
+        device (torch.device): Device to train on.
+    """
+    model.train()
+    model.to(device)
+
+    # Define optimizer, scheduler, and scaler for mixed precision
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
+    scaler = GradScaler()
+    total_steps = math.ceil(len(dataset) / config.batch_size) * config.num_epochs
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, num_warmup_steps=config.warmup_steps, num_training_steps=total_steps
+    )
+
+    # Define loss function with token weights
+    weight = load_token_weights("token_weights.json", device)
+    loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+
+    for epoch in range(config.num_epochs):
+        print(f"Epoch {epoch + 1}/{config.num_epochs}")
+        epoch_loss = 0
+        correct_predictions = 0
+        total_predictions = 0
+
+        # Shuffle dataset at the start of each epoch
+        shuffled_dataset = dataset.shuffle(seed=config.seed + epoch)
+
+        for i, batch in enumerate(
+            tqdm(shuffled_dataset.batch(config.batch_size), desc="Training")
+        ):
+            # Prepare batch
+            (
+                tokens_tensor,
+                attention_mask_tensor,
+                word_boundaries,
+                sequence_ids,
+                target_ids,
+                target_key_padding_mask,
+            ) = prepare_batch(batch, tokenizer, config, device)
+
+            # Forward pass
+            optimizer.zero_grad()
+            with autocast():  # Mixed precision training
+                output = model(
+                    x=tokens_tensor,
+                    sequence_ids=torch.tensor(
+                        sequence_ids, dtype=torch.long, device=device
+                    ),
+                    target_ids=target_ids,
+                    target_key_padding_mask=target_key_padding_mask,
+                    attention_mask=attention_mask_tensor,
+                    word_boundaries=word_boundaries,
+                )
+
+                loss = loss_fn(
+                    output.view(-1, output.size(-1)),
+                    target_ids[:, 1:].contiguous().view(-1),
+                )
+
+            # Calculate accuracy
+            predictions = torch.argmax(output, dim=-1)
+            mask = target_ids[:, 1:] != PAD_BYTE
+            correct_predictions += (
+                (predictions[mask] == target_ids[:, 1:][mask]).sum().item()
             )
-        }
-    )
+            total_predictions += mask.sum().item()
 
-    # tokenize
-    trainset = trainset.map(lambda t: Tokenizer().tokenize(t.get("noise")))
-    trainset = trainset.map(
-        lambda t: {
-            f"clean_{k}": v for k, v in Tokenizer().tokenize(t.get(text_col)).items()
-        }
-    )
-    trainset = trainset.map(
-        lambda t: Tokenizer().targets(
-            input_ids=t["clean_input_ids"],
-            attention_mask=t["clean_attention_mask"],
-            word_start=t["clean_word_start"],
+            # Backward pass
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+
+            # Accumulate loss
+            epoch_loss += loss.item()
+
+            # Print loss and accuracy every 10 steps
+            if (i + 1) % 10 == 0:
+                accuracy = (
+                    correct_predictions / total_predictions
+                    if total_predictions > 0
+                    else 0
+                )
+                print(
+                    f"Step {i + 1}/{math.ceil(len(dataset) / config.batch_size)}, "
+                    f"Loss: {loss.item():.4f}, Accuracy: {accuracy:.2%}"
+                )
+                # Reset metrics
+                correct_predictions = 0
+                total_predictions = 0
+
+        avg_epoch_loss = epoch_loss / math.ceil(len(dataset) / config.batch_size)
+        print(f"Epoch {epoch + 1} Loss: {avg_epoch_loss:.4f}")
+
+        # Save the model checkpoint
+        os.makedirs(config.output_dir, exist_ok=True)
+        checkpoint_path = os.path.join(
+            config.output_dir, f"model_epoch_{epoch + 1}.pth"
         )
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"Saved model checkpoint to {checkpoint_path}")
+
+
+def main():
+    # Initialize Training Configuration
+    training_config = TrainingConfig(
+        num_epochs=1,
+        batch_size=64,
+        learning_rate=5e-4,
+        warmup_steps=200,
+        output_dir="./checkpoints",
+        max_sequence_length=64,
+        dataset_split="train[0:100000]",
+        dataset_name="wikimedia/wikipedia",
+        dataset_language="20231101.en",
+        seed=42,
     )
 
-    # create dataloader
-    return DataLoader(
-        trainset,
-        batch_size=train.train.batch_size,
-        # shuffle=train.data.shuffle,
-        num_workers=train.data.num_workers,
-        pin_memory=train.data.pin_memory,
+    # Set seed for reproducibility
+    set_seed(training_config.seed)
+
+    # Load the dataset
+    dataset = load_dataset(
+        training_config.dataset_name,
+        training_config.dataset_language,
+        split=training_config.dataset_split,
+    )
+    dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"]) > 50)
+
+    # Initialize the tokenizer and model
+    tokenizer = ByteLevelTokenizer(
+        max_sequence_length=training_config.max_sequence_length
+    )
+    model = Encodzall(config=encodzall_m)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Start training
+    train(
+        model=model,
+        tokenizer=tokenizer,
+        dataset=dataset,
+        config=training_config,
+        device=device,
     )
 
 
-def calculate_nll_loss(contrastive_loss, embeds0, embeds1):
-    TEMPERATURE = train.train.temperature
-    valid = torch.where(torch.any(embeds0 > 0, dim=1))[0]
-    embeds0 = embeds0[valid]
-    embeds1 = embeds1[valid]
-
-    # SimCSE-style contrastive learning task for pooled embeddings
-    labels = torch.arange(
-        embeds0.shape[0],
-        dtype=torch.long,
-        device=embeds0.device,
-        requires_grad=False,
-    )
-    csim = cos_sim(embeds0.squeeze(), embeds1.squeeze().detach()) * (1.0 / TEMPERATURE)
-    return contrastive_loss(csim, labels)
-
-
-def save_checkpoint(model, optimizer, epoch, loss, hyperparameters, filepath):
-    checkpoint = {
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "epoch": epoch,
-        "loss": loss,
-        "tokenizer": vars(arch.tokenizer),
-        "word_encoder": vars(arch.word_encoder),
-    }
-    torch.save(checkpoint, filepath)
-
-
-from torch.cuda.amp import autocast, GradScaler
-
-model = AutoEncoder(arch).to(device)
-model.train()
-optimizer = AdamW(model.parameters(), lr=train.train.learning_rate)
-sched = ExponentialLR(optimizer=optimizer, gamma=train.train.learning_rate_decay)
-contrastive_loss = nn.CrossEntropyLoss().to(device)
-dataloader = build_dataloader()
-accuracy = Accuracy(
-    task="multiclass",
-    ignore_index=arch.tokenizer.pad_id,
-    num_classes=arch.tokenizer.n_vocab,
-).cuda()
-
-# Initialize the gradient scaler
-scaler = GradScaler()
-
-global_step = 0
-for epoch in range(train.train.epochs):
-    accum_loss = 0
-    accum_loss_c = 0
-    acc = 0
-    for step, batch in enumerate(build_dataloader()):
-        model.train()
-        batch = {
-            k: v.to(device) for k, v in batch.items() if k not in (text_col, "noise")
-        }
-        optimizer.zero_grad()
-
-        # Run the forward pass under autocast
-        with autocast():
-            reconstructive, embed0 = model(**batch)
-            preds, target, loss = reconstructive
-            if train.train.contrastive:
-                with torch.no_grad():
-                    embed1 = model(
-                        input_ids=batch["clean_input_ids"],
-                        attention_mask=batch["clean_attention_mask"],
-                        word_start=batch["clean_word_start"],
-                        target_ids=None,
-                        target_mask=None,
-                        skip_decode=True,
-                    )
-                loss_c = calculate_nll_loss(contrastive_loss, embed0, embed1)
-                total_loss = loss + loss_c
-            else:
-                total_loss = loss
-
-        scaler.scale(total_loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        accum_loss += loss.item()
-        if train.train.contrastive:
-            accum_loss_c += loss_c.item()
-        acc += accuracy(preds, target)
-
-        n = train.train.metrics_steps
-        if global_step % n == n - 1:
-            print(
-                f"Loss ({epoch}:{step}): {accum_loss/n:.3f} contrastive={accum_loss_c/n:.3f}"
-            )
-            print(f"Accuracy ({epoch}:{step}):  {acc/n:.3f}")
-            accum_loss = 0
-            accum_loss_c = 0
-            acc = 0
-
-        chkpt = train.train.checkpoint_steps
-        if global_step % chkpt == chkpt - 1:
-            save_checkpoint(
-                model, optimizer, epoch, loss, arch, f"checkpoint_{epoch}_{step}.pth"
-            )
-
-        global_step += 1
+if __name__ == "__main__":
+    main()

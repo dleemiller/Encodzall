@@ -1,32 +1,79 @@
-import functools
-import os
-import toml
+# config.py
+from dataclasses import dataclass
+from typing import Optional
 
 
-class ToObject(object):
-    """
-    https://stackoverflow.com/a/6993694
-    """
+@dataclass
+class TransformerConfig:
+    # Required Parameters (No default values)
+    vocab_size: int
+    d_model: int
+    nhead: int
+    num_encoder1_layers: int
+    num_encoder2_layers: int
+    num_decoder_layers: int
+    activation: str
+    dim_feedforward: int
+    dropout: float
+    max_seq_length_encoder1: int
+    max_seq_length_encoder2: int
+    max_seq_length_decoder: int
+    pooling_type: str
 
-    def __init__(self, data):
-        for name, value in data.items():
-            setattr(self, name, self._wrap(value))
-
-    def _wrap(self, value):
-        if isinstance(value, (tuple, list, set, frozenset)):
-            return type(value)([self._wrap(v) for v in value])
-        else:
-            return ToObject(value) if isinstance(value, dict) else value
+    # Optional Parameters (Default to None)
+    num_kv_heads_encoder1: Optional[int] = None
+    num_kv_heads_encoder2: Optional[int] = None
 
 
-def load_config(model_name):
-    path = os.path.join(os.path.dirname(__file__), f"{model_name}.toml")
-    with open(path, "r") as fh:
-        config = toml.load(fh)
-    return ToObject(config)
+# Configurations
 
+# Small configuration
+encodzall_s = TransformerConfig(
+    vocab_size=256,
+    d_model=256,
+    nhead=4,
+    num_encoder1_layers=1,
+    num_encoder2_layers=1,
+    num_decoder_layers=2,
+    activation="gelu",
+    dim_feedforward=1024,
+    dropout=0.1,
+    max_seq_length_encoder1=64,
+    max_seq_length_encoder2=1024,
+    max_seq_length_decoder=4096,
+    pooling_type="average",
+)
 
-load_s = functools.partial(load_config, "encodzall_small")
-load_train = functools.partial(load_config, "train")
+# Medium configuration
+encodzall_m = TransformerConfig(
+    vocab_size=256,
+    d_model=384,
+    nhead=6,
+    num_encoder1_layers=2,
+    num_encoder2_layers=2,
+    num_decoder_layers=2,
+    activation="gelu",
+    dim_feedforward=2048,
+    dropout=0.05,
+    max_seq_length_encoder1=64,
+    max_seq_length_encoder2=1024,
+    max_seq_length_decoder=4096,
+    pooling_type="average",
+)
 
-__all__ = [load_config, load_s, load_train]
+# Large configuration
+encodzall_l = TransformerConfig(
+    vocab_size=256,
+    d_model=512,
+    nhead=8,
+    num_encoder1_layers=4,
+    num_encoder2_layers=4,
+    num_decoder_layers=8,
+    activation="gelu",
+    dim_feedforward=4096,
+    dropout=0.1,
+    max_seq_length_encoder1=64,
+    max_seq_length_encoder2=2048,
+    max_seq_length_decoder=4096,
+    pooling_type="average",
+)
