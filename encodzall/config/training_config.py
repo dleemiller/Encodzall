@@ -9,9 +9,9 @@ class TrainingConfig:
     warmup_steps: int
     output_dir: str
     max_sequence_length: int
-    dataset_split: str = "train[0:100000]"
-    dataset_name: str = "wikimedia/wikipedia"
-    dataset_language: str = "20231101.en"
+    dataset_split: str
+    dataset_name: str
+    dataset_subset: str
     seed: int = 42
     target_loss: float = 1.0
     pid_Kp: float = 1.0
