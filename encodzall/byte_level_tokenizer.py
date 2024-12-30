@@ -285,7 +285,7 @@ class ByteLevelTokenizer:
         truncate_len: int = 320,
         char_len: int = 2048,
         mask_prob: bool = 0.0,
-        noise_prob: float = 0.0,
+        noise_prob: Optional[float] = None,
     ) -> tuple[
         torch.Tensor, torch.Tensor, list[list[tuple[int, int]]], list[list[int]]
     ]:
@@ -328,8 +328,8 @@ class ByteLevelTokenizer:
             words = words[:truncate_len]
 
         # 4) Optionally apply noise
-        if noise_prob or self.noise_config.noise_prob:
-            noise_prob = max(noise_prob, self.noise_config.noise_prob)
+        if noise_prob or self.noise_config.noise_prob > 0:
+            noise_prob = noise_prob or self.noise_config.noise_prob
             assert 0 <= noise_prob <= 1
             noised_words = self.apply_noise_to_words(words, noise_prob=noise_prob)
         else:

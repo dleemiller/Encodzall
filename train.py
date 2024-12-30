@@ -19,7 +19,6 @@ from simple_pid import PID
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
 from encodzall import encodzall_xs, encodzall_s, Encodzall, ByteLevelTokenizer, PAD_BYTE
-from encodzall import encodzall_xs, Encodzall, ByteLevelTokenizer, PAD_BYTE
 from sentence_transformers.losses import MultipleNegativesRankingLoss
 
 
@@ -62,7 +61,9 @@ def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] 
     )
 
     for j, text in enumerate(texts):
-        tokens, mask, boundaries, targets = tokenizer.tokenize(text, noise_prob=noise_prob)
+        tokens, mask, boundaries, targets = tokenizer.tokenize(
+            text, noise_prob=noise_prob
+        )
         token_ids.append(tokens)
         attention_masks.append(mask)
         word_boundaries.extend(boundaries)
@@ -164,7 +165,9 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
     reconstruction_loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
 
     # Initialize the contrastive loss
-    contrastive_loss_fn = MultipleNegativesRankingLoss(model, scale=20.0)  # Adjust scale as needed
+    contrastive_loss_fn = MultipleNegativesRankingLoss(
+        model, scale=20.0
+    )  # Adjust scale as needed
 
     pid = PID(config.pid_Kp, config.pid_Ki, config.pid_Kd, setpoint=config.target_loss)
     pid.output_limits = (config.prob_min, config.prob_max)
@@ -196,11 +199,11 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
                 sequence_ids,
                 target_ids,
                 target_key_padding_mask,
-            ) = prepare_batch(batch, tokenizer, config, device, noise_prob=prob)
+            ) = prepare_batch(batch, tokenizer, config, device)
 
             optimizer.zero_grad()
             with autocast("cuda"):
-                logits = model(
+                embeddings_anchor, logits = model(
                     x=tokens_tensor,
                     sequence_ids=torch.tensor(
                         sequence_ids, dtype=torch.long, device=device
@@ -241,20 +244,6 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
                     return_embeddings_only=True,  # Get embeddings only
                 )  # Shape: (batch_size, d_model)
 
-            # Now, obtain embeddings for the anchor (current batch)
-            with autocast("cuda"):
-                embeddings_anchor = model(
-                    x=tokens_tensor,
-                    sequence_ids=torch.tensor(
-                        sequence_ids, dtype=torch.long, device=device
-                    ),
-                    target_ids=target_ids,
-                    target_key_padding_mask=target_key_padding_mask,
-                    attention_mask=attention_mask_tensor,
-                    word_boundaries=word_boundaries,
-                    return_embeddings_only=True,  # Get embeddings only
-                )  # Shape: (batch_size, d_model)
-
             # Prepare sentence_features for MultipleNegativesRankingLoss
             # According to the class definition, the first element should be anchors,
             # and the second element should be positives.
@@ -264,10 +253,14 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
             ]
 
             # Compute contrastive loss
-            contrastive_loss = contrastive_loss_fn(sentence_features=sentence_features, labels=None)
+            contrastive_loss = contrastive_loss_fn(
+                sentence_features=sentence_features, labels=None
+            )
 
             # ----- Combine Losses -----
-            total_loss = reconstruction_loss + contrastive_loss  # You can weight them if needed
+            total_loss = (
+                reconstruction_loss + contrastive_loss
+            )  # You can weight them if needed
 
             # ----- Backpropagation -----
             scaler.scale(total_loss).backward()
@@ -282,8 +275,12 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
 
             # ----- TensorBoard Logging -----
             if writer:
-                writer.add_scalar("Loss/train_reconstruction", reconstruction_loss.item(), step)
-                writer.add_scalar("Loss/train_contrastive", contrastive_loss.item(), step)
+                writer.add_scalar(
+                    "Loss/train_reconstruction", reconstruction_loss.item(), step
+                )
+                writer.add_scalar(
+                    "Loss/train_contrastive", contrastive_loss.item(), step
+                )
                 writer.add_scalar("Loss/train_total", total_loss.item(), step)
                 # Optional: Add more metrics as needed
                 writer.add_scalar("Prob/train", prob, step)
@@ -344,7 +341,7 @@ def main():
         warmup_steps=1000,
         output_dir="./checkpoints",
         max_sequence_length=64,
-        dataset_split="train",
+        dataset_split="train[0:10000]",
         dataset_name="HuggingFaceTB/smollm-corpus",
         dataset_subset="fineweb-edu-dedup",
         seed=42,
@@ -368,7 +365,8 @@ def main():
         training_config.dataset_name,
         training_config.dataset_subset,
         split=training_config.dataset_split,
-        download_config=DownloadConfig(resume_download=True),
+        data_dir="/home/datasets/HuggingFaceTB___smollm-corpus",
+        # download_config=DownloadConfig(resume_download=True),
     )
     # dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"]) > 50)
 
@@ -408,4 +406,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
