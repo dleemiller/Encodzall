@@ -1,3 +1,4 @@
+# training_script.py
 from datetime import datetime
 import os
 import json
@@ -5,7 +6,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 from transformers import get_cosine_schedule_with_warmup
 from datasets import load_dataset, DownloadConfig
 from tqdm import tqdm
@@ -18,6 +19,8 @@ from simple_pid import PID
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
 from encodzall import encodzall_xs, encodzall_s, Encodzall, ByteLevelTokenizer, PAD_BYTE
+from encodzall import encodzall_xs, Encodzall, ByteLevelTokenizer, PAD_BYTE
+from sentence_transformers.losses import MultipleNegativesRankingLoss
 
 
 def set_seed(seed: int):
@@ -35,7 +38,7 @@ def load_token_weights(filepath: str, device: torch.device) -> torch.Tensor:
     return weight
 
 
-def prepare_batch(batch, tokenizer, config, device):
+def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] = None):
     """
     Tokenize and pad the batch data.
 
@@ -44,6 +47,7 @@ def prepare_batch(batch, tokenizer, config, device):
         tokenizer (ByteLevelTokenizer): Tokenizer instance.
         config (TrainingConfig): Training configuration.
         device (torch.device): Device to place tensors.
+        noise_prob (float, optional): Probability of applying noise. Defaults to None.
 
     Returns:
         Tuple containing token_ids, attention_masks, word_boundaries, sequence_ids, target_ids, target_key_padding_mask
@@ -58,7 +62,7 @@ def prepare_batch(batch, tokenizer, config, device):
     )
 
     for j, text in enumerate(texts):
-        tokens, mask, boundaries, targets = tokenizer.tokenize(text)
+        tokens, mask, boundaries, targets = tokenizer.tokenize(text, noise_prob=noise_prob)
         token_ids.append(tokens)
         attention_masks.append(mask)
         word_boundaries.extend(boundaries)
@@ -157,7 +161,10 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
     )
 
     weight = load_token_weights("token_weights.json", device)
-    loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+    reconstruction_loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+
+    # Initialize the contrastive loss
+    contrastive_loss_fn = MultipleNegativesRankingLoss(model, scale=20.0)  # Adjust scale as needed
 
     pid = PID(config.pid_Kp, config.pid_Ki, config.pid_Kd, setpoint=config.target_loss)
     pid.output_limits = (config.prob_min, config.prob_max)
@@ -169,7 +176,7 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Loading checkpoint from {checkpoint_path}")
         start_step, config, pid, prob, dataset_offset = load_checkpoint(
-            checkpoint_path, model, optimizer, scheduler, scaler
+            checkpoint_path, model, optimizer, scheduler, scaler, config
         )
         tokenizer.noise_config.set_prob(prob)
 
@@ -189,11 +196,11 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
                 sequence_ids,
                 target_ids,
                 target_key_padding_mask,
-            ) = prepare_batch(batch, tokenizer, config, device)
+            ) = prepare_batch(batch, tokenizer, config, device, noise_prob=prob)
 
             optimizer.zero_grad()
             with autocast("cuda"):
-                output = model(
+                logits = model(
                     x=tokens_tensor,
                     sequence_ids=torch.tensor(
                         sequence_ids, dtype=torch.long, device=device
@@ -203,39 +210,88 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
                     attention_mask=attention_mask_tensor,
                     word_boundaries=word_boundaries,
                 )
-                loss = loss_fn(
-                    output.view(-1, output.size(-1)),
+                # Compute reconstruction loss
+                reconstruction_loss = reconstruction_loss_fn(
+                    logits.view(-1, logits.size(-1)),
                     target_ids[:, 1:].contiguous().view(-1),
                 )
 
-            predictions = torch.argmax(output, dim=-1)
-            mask = target_ids[:, 1:] != PAD_BYTE
-            correct_predictions = (
-                (predictions[mask] == target_ids[:, 1:][mask]).sum().item()
-            )
-            total_predictions = mask.sum().item()
+            # ----- Contrastive Learning with Fixed Noise Probability -----
+            with torch.no_grad():
+                # Tokenize with fixed noise probability (e.g., 0.5) for positive examples
+                (
+                    tokens_tensor_pos,
+                    attention_mask_tensor_pos,
+                    word_boundaries_pos,
+                    sequence_ids_pos,
+                    target_ids_pos,
+                    target_key_padding_mask_pos,
+                ) = prepare_batch(batch, tokenizer, config, device, noise_prob=0.5)
 
-            scaler.scale(loss).backward()
+                # Obtain embeddings for contrastive loss
+                embeddings_pos = model(
+                    x=tokens_tensor_pos,
+                    sequence_ids=torch.tensor(
+                        sequence_ids_pos, dtype=torch.long, device=device
+                    ),
+                    target_ids=target_ids_pos,
+                    target_key_padding_mask=target_key_padding_mask_pos,
+                    attention_mask=attention_mask_tensor_pos,
+                    word_boundaries=word_boundaries_pos,
+                    return_embeddings_only=True,  # Get embeddings only
+                )  # Shape: (batch_size, d_model)
+
+            # Now, obtain embeddings for the anchor (current batch)
+            with autocast("cuda"):
+                embeddings_anchor = model(
+                    x=tokens_tensor,
+                    sequence_ids=torch.tensor(
+                        sequence_ids, dtype=torch.long, device=device
+                    ),
+                    target_ids=target_ids,
+                    target_key_padding_mask=target_key_padding_mask,
+                    attention_mask=attention_mask_tensor,
+                    word_boundaries=word_boundaries,
+                    return_embeddings_only=True,  # Get embeddings only
+                )  # Shape: (batch_size, d_model)
+
+            # Prepare sentence_features for MultipleNegativesRankingLoss
+            # According to the class definition, the first element should be anchors,
+            # and the second element should be positives.
+            sentence_features = [
+                {"sentence_embedding": embeddings_anchor},
+                {"sentence_embedding": embeddings_pos},
+            ]
+
+            # Compute contrastive loss
+            contrastive_loss = contrastive_loss_fn(sentence_features=sentence_features, labels=None)
+
+            # ----- Combine Losses -----
+            total_loss = reconstruction_loss + contrastive_loss  # You can weight them if needed
+
+            # ----- Backpropagation -----
+            scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
 
-            pid_output = pid(loss.item())
+            # ----- PID Controller for Noise Probability -----
+            pid_output = pid(total_loss.item())
             prob = min(max(prob + pid_output, config.prob_min), config.prob_max)
             tokenizer.noise_config.set_prob(prob)
 
-            # TensorBoard logging
+            # ----- TensorBoard Logging -----
             if writer:
-                writer.add_scalar("Loss/train", loss.item(), step)
-                writer.add_scalar(
-                    "Accuracy/train", correct_predictions / total_predictions, step
-                )
+                writer.add_scalar("Loss/train_reconstruction", reconstruction_loss.item(), step)
+                writer.add_scalar("Loss/train_contrastive", contrastive_loss.item(), step)
+                writer.add_scalar("Loss/train_total", total_loss.item(), step)
+                # Optional: Add more metrics as needed
                 writer.add_scalar("Prob/train", prob, step)
                 writer.add_scalar(
                     "LearningRate/train", optimizer.param_groups[0]["lr"], step
                 )
 
-            # Save checkpoint every N steps
+            # ----- Save Checkpoint every N Steps -----
             if step > 0 and step % config.checkpoint_interval == 0:
                 dataset_offset = (step * config.batch_size) % len(dataset)
                 checkpoint_path_step = os.path.join(
@@ -264,7 +320,7 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
 def main():
     # Parse command-line arguments for flexibility
     parser = argparse.ArgumentParser(
-        description="Train Encodzall model with PID-controlled noise"
+        description="Train Encodzall model with PID-controlled noise and contrastive loss"
     )
     parser.add_argument(
         "--checkpoint",
@@ -326,6 +382,7 @@ def main():
         max_sequence_length=training_config.max_sequence_length,
         noise_config=noise_config,
     )
+
     model = Encodzall(config=encodzall_xs)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -351,3 +408,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
