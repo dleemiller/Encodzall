@@ -28,32 +28,32 @@ class TransformerConfig:
 # Configurations
 
 # Small configuration
-encodzall_s = TransformerConfig(
+encodzall_xs = TransformerConfig(
     vocab_size=256,
     d_model=256,
-    nhead=4,
-    num_encoder1_layers=1,
+    nhead=8,
+    num_encoder1_layers=2,
     num_encoder2_layers=1,
     num_decoder_layers=2,
     activation="gelu",
     dim_feedforward=1024,
-    dropout=0.1,
+    dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,
     max_seq_length_decoder=4096,
     pooling_type="average",
 )
 
-# Medium configuration
-encodzall_m = TransformerConfig(
+# Small configuration
+encodzall_s = TransformerConfig(
     vocab_size=256,
     d_model=384,
-    nhead=6,
+    nhead=12,
     num_encoder1_layers=2,
     num_encoder2_layers=2,
     num_decoder_layers=2,
     activation="gelu",
-    dim_feedforward=2048,
+    dim_feedforward=1536,
     dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,

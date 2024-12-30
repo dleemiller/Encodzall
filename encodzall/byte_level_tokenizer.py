@@ -27,6 +27,8 @@ SPECIAL_BYTES = {
 BYTE_TO_SPECIAL_TOKEN = {v: k for k, v in SPECIAL_BYTES.items()}
 SPECIAL_TOKEN_SET = set(SPECIAL_BYTES.values())
 
+# noise.moe("load")
+
 
 class ByteLevelTokenizer:
     """
@@ -76,7 +78,14 @@ class ByteLevelTokenizer:
         Optionally apply noise to each word using string_noise OCR simulation.
         Probability for each word is randomly chosen between [min_p, max_p].
         """
-        return [noise.ocr(word, probability=noise_prob) for word in words]
+        # use several kinds of character level noising
+        # noise.moe - mispelling (from Mispelling Oblivious Embeddings)  # needs fixed!
+        # noise.ocr - simulated ocr character corruption
+        # noise.keyboard - nearby keystrokes
+        # noise.mask - masking with distinct masks consonants, non-whitespace (punc), vowels and either (general)
+        # noise.mask - 0x06-0x0B
+        noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        return [noise_func(word, probability=noise_prob) for word in words]
 
     def encode_words(
         self, words: list[str], target_min_len: int = 8, word_break: int = 16
@@ -273,7 +282,7 @@ class ByteLevelTokenizer:
         self,
         text: str,
         add_eos: bool = True,
-        truncate_len: int = 256,
+        truncate_len: int = 320,
         char_len: int = 2048,
         mask_prob: bool = 0.0,
         noise_prob: float = 0.0,
@@ -308,9 +317,9 @@ class ByteLevelTokenizer:
         words = self.split_text(text)
 
         # limit characters
-        word_len = list(
-            itertools.accumulate(map(lambda x: len(x.encode("utf-8")), words))
-        )
+        encoded_lengths = [len(word.encode("utf-8")) for word in words]
+        word_len = list(itertools.accumulate(encoded_lengths))
+
         max_idx = max([i for i, x in enumerate(word_len) if x < char_len])
         words = words[0 : max_idx + 1]
 
