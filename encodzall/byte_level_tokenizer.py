@@ -88,7 +88,7 @@ class ByteLevelTokenizer:
         return [noise_func(word, probability=noise_prob) for word in words]
 
     def encode_words(
-        self, words: list[str], target_min_len: int = 8, word_break: int = 16
+        self, words: list[str], target_min_len: int = 12, word_break: int = 12
     ) -> list[list[int]]:
         """
         Encode each word into its corresponding byte values (0-255).
@@ -110,7 +110,7 @@ class ByteLevelTokenizer:
         # Break long sequences into chunks of size `word_break`
         chunked_sequences = []
         for seq in byte_sequences:
-            chunked_sequences.extend(more_itertools.chunked(seq, word_break))
+            chunked_sequences.extend(more_itertools.chunked_even(seq, word_break))
 
         # Collect short word sequences into groups of at least `target_min_len` bytes
         constrained = list(
@@ -285,7 +285,8 @@ class ByteLevelTokenizer:
         truncate_len: int = 320,
         char_len: int = 2048,
         mask_prob: bool = 0.0,
-        noise_prob: Optional[float] = None,
+        noise_prob: float | None = None,
+        return_byte_seq: bool = False
     ) -> tuple[
         torch.Tensor, torch.Tensor, list[list[tuple[int, int]]], list[list[int]]
     ]:
@@ -337,6 +338,8 @@ class ByteLevelTokenizer:
 
         # 5) Encode words (noised for the actual input)
         byte_sequences_noised = self.encode_words(noised_words)
+        if return_byte_seq:
+            return byte_sequences_noised
 
         # 6) Pack these sequences
         packed_sequences, word_boundaries_list = self.pack_sequences(
