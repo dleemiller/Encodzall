@@ -69,7 +69,7 @@ class ByteLevelTokenizer:
         Returns:
             list[str]: list of tokens with preserved trailing whitespace.
         """
-        return re.findall(r"\S+\s*", text)
+        return re.findall(r"[\s]*\S+[\s\-]*", text)
 
     def apply_noise_to_words(
         self, words: list[str], noise_prob: float = 0.0
