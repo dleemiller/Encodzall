@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
 from transformers import get_cosine_schedule_with_warmup
-from datasets import load_dataset
+from datasets import load_dataset, DownloadConfig
 from tqdm import tqdm
 from typing import Optional
 import argparse
@@ -17,7 +17,7 @@ from simple_pid import PID
 # Import configurations and modules
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
-from encodzall import encodzall_m, Encodzall, ByteLevelTokenizer, PAD_BYTE
+from encodzall import encodzall_xs, encodzall_s, Encodzall, ByteLevelTokenizer, PAD_BYTE
 
 
 def set_seed(seed: int):
@@ -110,7 +110,7 @@ def save_checkpoint(
         "pid_setpoint": pid.setpoint,
         "pid_auto_mode": pid.auto_mode,
         "prob": prob,
-        "dataset_offset": dataset_offset,  # Save dataset offset
+        "dataset_offset": dataset_offset,
         "config": config.__dict__,
     }
     torch.save(checkpoint, checkpoint_path)
@@ -173,16 +173,15 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
         )
         tokenizer.noise_config.set_prob(prob)
 
+        # Apply offset for resumption
+        if dataset_offset > 0:
+            dataset = dataset.skip(dataset_offset)
+
     step = start_step
     for epoch in range(config.num_epochs):
         print(f"Epoch {epoch + 1}/{config.num_epochs}")
 
-        # Shuffle dataset and apply offset for resumption
-        shuffled_dataset = dataset.shuffle(seed=config.seed + epoch)
-        if dataset_offset > 0:
-            shuffled_dataset = shuffled_dataset.skip(dataset_offset)
-
-        for batch in tqdm(shuffled_dataset.batch(config.batch_size), desc=f"Training"):
+        for batch in tqdm(dataset.batch(config.batch_size), desc=f"Training"):
             (
                 tokens_tensor,
                 attention_mask_tensor,
@@ -283,17 +282,17 @@ def main():
 
     # Initialize Training Configuration
     training_config = TrainingConfig(
-        num_epochs=10,  # Adjust as needed
-        batch_size=64,
+        num_epochs=2,  # Adjust as needed
+        batch_size=80,
         learning_rate=5e-4,
-        warmup_steps=200,
+        warmup_steps=1000,
         output_dir="./checkpoints",
         max_sequence_length=64,
-        dataset_split="train[0:10000]",
-        dataset_name="wikimedia/wikipedia",
-        dataset_language="20231101.en",
+        dataset_split="train",
+        dataset_name="HuggingFaceTB/smollm-corpus",
+        dataset_subset="fineweb-edu-dedup",
         seed=42,
-        target_loss=0.3,  # Desired loss
+        target_loss=0.2,  # Desired loss
         pid_Kp=1.0,  # Proportional gain
         pid_Ki=0.1,  # Integral gain
         pid_Kd=0.05,  # Derivative gain
@@ -302,7 +301,7 @@ def main():
         prob_max=1.0,  # Maximum total probability
         mask_ratio=0.2,  # Fixed ratio for masking
         noise_ratio=0.8,  # Fixed ratio for noise
-        checkpoint_interval=500,
+        checkpoint_interval=2000,
     )
 
     # Set seed for reproducibility
@@ -311,10 +310,11 @@ def main():
     # Load the dataset
     dataset = load_dataset(
         training_config.dataset_name,
-        training_config.dataset_language,
+        training_config.dataset_subset,
         split=training_config.dataset_split,
+        download_config=DownloadConfig(resume_download=True),
     )
-    dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"]) > 50)
+    # dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"]) > 50)
 
     # Initialize the tokenizer with NoiseConfig
     noise_config = NoiseConfig(
@@ -326,7 +326,7 @@ def main():
         max_sequence_length=training_config.max_sequence_length,
         noise_config=noise_config,
     )
-    model = Encodzall(config=encodzall_m)
+    model = Encodzall(config=encodzall_xs)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
