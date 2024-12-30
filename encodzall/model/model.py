@@ -1,7 +1,7 @@
 # model.py
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 from ..config import TransformerConfig
 from .encoder import TransformerEncoder
@@ -77,6 +77,47 @@ class Encodzall(nn.Module):
         # Output layer
         self.output_layer = nn.Linear(self.d_model, config.vocab_size)
 
+    def average_pool_memory(
+        self, memory: torch.Tensor, memory_key_padding_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Performs average pooling on the memory vectors, respecting the padding mask.
+
+        Args:
+            memory (torch.Tensor): Memory tensor from the second encoder of shape (batch_size, seq_length, d_model).
+            memory_key_padding_mask (torch.Tensor): Padding mask for the memory of shape (batch_size, seq_length),
+                                                    where True indicates padding tokens.
+
+        Returns:
+            torch.Tensor: Average pooled embeddings of shape (batch_size, d_model).
+        """
+        # Invert mask: True for valid tokens, False for padding
+        valid_mask = ~memory_key_padding_mask  # Shape: (batch_size, seq_length)
+
+        # Expand mask for multiplication
+        valid_mask_expanded = valid_mask.unsqueeze(
+            -1
+        ).float()  # Shape: (batch_size, seq_length, 1)
+
+        # Zero out the padded tokens
+        memory_masked = (
+            memory * valid_mask_expanded
+        )  # Shape: (batch_size, seq_length, d_model)
+
+        # Sum the memory vectors
+        sum_memory = memory_masked.sum(dim=1)  # Shape: (batch_size, d_model)
+
+        # Count the number of valid (non-padded) tokens
+        counts = valid_mask_expanded.sum(dim=1)  # Shape: (batch_size, 1)
+
+        # Avoid division by zero
+        counts = counts.clamp(min=1e-9)
+
+        # Compute the average pooled embeddings
+        embeddings = sum_memory / counts  # Shape: (batch_size, d_model)
+
+        return embeddings
+
     def forward(
         self,
         x: torch.Tensor,
@@ -85,7 +126,8 @@ class Encodzall(nn.Module):
         target_key_padding_mask: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         word_boundaries: Optional[List[List[Tuple[int, int]]]] = None,
-    ) -> torch.Tensor:
+        return_embeddings_only: bool = False,  # Added flag
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass of the Encodzall model.
 
@@ -96,9 +138,14 @@ class Encodzall(nn.Module):
             target_key_padding_mask (torch.Tensor): Padding mask for the target.
             attention_mask (torch.Tensor, optional): Attention mask for the encoder of shape (batch_size, seq_length, seq_length).
             word_boundaries (List[List[Tuple[int, int]]], optional): Word boundaries for word pooling.
+            return_embeddings_only (bool, optional): If set to True, returns only the pooled embeddings. Defaults to False.
 
         Returns:
-            torch.Tensor: Logits tensor of shape (batch_size, target_seq_length - 1, vocab_size).
+            torch.Tensor or Tuple[torch.Tensor, torch.Tensor]:
+                - If `return_embeddings_only` is True, returns the pooled embeddings tensor of shape (batch_size, d_model).
+                - Otherwise, returns a tuple containing:
+                    1. Pooled embeddings tensor of shape (batch_size, d_model).
+                    2. Logits tensor of shape (batch_size, target_seq_length - 1, vocab_size).
         """
         batch_size, seq_length = x.size()
         device = x.device
@@ -123,6 +170,20 @@ class Encodzall(nn.Module):
         memory = self.encoder2(
             encoder1_output, attn_mask=memory_key_padding_mask.unsqueeze(1) == 0
         )
+        # Note: Positional encoding will be added after average pooling
+
+        # ------------------------- Average Pooling Step Moved to Separate Function -------------------------
+        # Average pool the memory vectors, respecting the memory_key_padding_mask
+        embeddings = self.average_pool_memory(
+            memory, memory_key_padding_mask
+        )  # Shape: (batch_size, d_model)
+        # -----------------------------------------------------------------------------------------------
+
+        # Check if only embeddings should be returned
+        if return_embeddings_only:
+            return embeddings  # Early exit with embeddings
+
+        # Add positional encodings to memory
         memory += self.positional_encoding(seq_length=memory.size(1), device=device)
 
         # Embed target tokens
@@ -152,4 +213,10 @@ class Encodzall(nn.Module):
             decoder_output
         )  # Shape: (batch_size, target_seq_length, vocab_size)
 
-        return logits[:, :-1, :].contiguous()  # Exclude last token for prediction
+        # Exclude last token for prediction
+        logits = logits[
+            :, :-1, :
+        ].contiguous()  # Shape: (batch_size, target_seq_length - 1, vocab_size)
+
+        # Return both embeddings and logits
+        return embeddings, logits
