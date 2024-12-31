@@ -6,7 +6,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from transformers import get_cosine_schedule_with_warmup
 from datasets import load_dataset, DownloadConfig
 from tqdm import tqdm
@@ -19,7 +19,7 @@ from simple_pid import PID
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
 from encodzall import encodzall_xs, encodzall_s, Encodzall, ByteLevelTokenizer, PAD_BYTE
-from sentence_transformers.losses import MultipleNegativesRankingLoss
+from encodzall.losses import MultipleNegativesRankingLoss
 
 
 def set_seed(seed: int):
@@ -52,7 +52,8 @@ def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] 
         Tuple containing token_ids, attention_masks, word_boundaries, sequence_ids, target_ids, target_key_padding_mask
     """
     texts = batch["text"]
-    token_ids, attention_masks, word_boundaries, sequence_ids, target_ids = (
+    token_ids, attention_masks, word_boundaries, sequence_ids, seq_target_ids, word_target_ids = (
+        [],
         [],
         [],
         [],
@@ -67,24 +68,31 @@ def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] 
         token_ids.append(tokens)
         attention_masks.append(mask)
         word_boundaries.extend(boundaries)
-        target_ids.append(targets)
+        seq_target_ids.append([item for sublist in targets for item in sublist])
+        word_target_ids.extend(targets)
         sequence_ids.extend([j] * sum(len(x) for x in boundaries))
 
     tokens_tensor = torch.cat(token_ids).to(device)
     attention_mask_tensor = torch.cat(attention_masks).to(device)
 
     # Generate target masks for reconstruction
-    target_ids, target_key_padding_mask = tokenizer.pad_targets(target_ids)
-    target_ids = target_ids.to(device)
-    target_key_padding_mask = target_key_padding_mask.to(device)
+    seq_target_ids, seq_key_padding_mask = tokenizer.pad_targets(seq_target_ids)
+    seq_target_ids = seq_target_ids.to(device)
+    seq_key_padding_mask = seq_key_padding_mask.to(device)
+
+    word_target_ids, word_key_padding_mask = tokenizer.pad_targets(word_target_ids)
+    word_target_ids = word_target_ids.to(device)
+    word_key_padding_mask = word_key_padding_mask.to(device)
 
     return (
         tokens_tensor,
         attention_mask_tensor,
         word_boundaries,
         sequence_ids,
-        target_ids,
-        target_key_padding_mask,
+        seq_target_ids,
+        seq_key_padding_mask,
+        word_target_ids,
+        word_key_padding_mask,
     )
 
 
@@ -165,9 +173,7 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
     reconstruction_loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
 
     # Initialize the contrastive loss
-    contrastive_loss_fn = MultipleNegativesRankingLoss(
-        model, scale=20.0
-    )  # Adjust scale as needed
+    contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
 
     pid = PID(config.pid_Kp, config.pid_Ki, config.pid_Kd, setpoint=config.target_loss)
     pid.output_limits = (config.prob_min, config.prob_max)
@@ -185,6 +191,7 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
 
         # Apply offset for resumption
         if dataset_offset > 0:
+            dataset_offset = 10780
             dataset = dataset.skip(dataset_offset)
 
     step = start_step
@@ -197,69 +204,65 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
                 attention_mask_tensor,
                 word_boundaries,
                 sequence_ids,
-                target_ids,
-                target_key_padding_mask,
+                seq_target_ids,
+                seq_key_padding_mask,
+                word_target_ids,
+                word_key_padding_mask,
             ) = prepare_batch(batch, tokenizer, config, device)
 
             optimizer.zero_grad()
             with autocast("cuda"):
-                embeddings_anchor, logits = model(
+                sequence_ids = torch.tensor(sequence_ids, dtype=torch.long, device=device)
+                _, seq_logits, word_logits = model(
                     x=tokens_tensor,
-                    sequence_ids=torch.tensor(
-                        sequence_ids, dtype=torch.long, device=device
-                    ),
-                    target_ids=target_ids,
-                    target_key_padding_mask=target_key_padding_mask,
+                    sequence_ids=sequence_ids,
+                    seq_target_ids=seq_target_ids,
+                    seq_key_padding_mask=seq_key_padding_mask,
+                    word_target_ids=word_target_ids,
+                    word_key_padding_mask=word_key_padding_mask,
                     attention_mask=attention_mask_tensor,
                     word_boundaries=word_boundaries,
                 )
                 # Compute reconstruction loss
-                reconstruction_loss = reconstruction_loss_fn(
-                    logits.view(-1, logits.size(-1)),
-                    target_ids[:, 1:].contiguous().view(-1),
+                seq_reconstruction_loss = reconstruction_loss_fn(
+                    seq_logits.view(-1, seq_logits.size(-1)),
+                    seq_target_ids[:, 1:].contiguous().view(-1),
+                )
+                word_reconstruction_loss = reconstruction_loss_fn(
+                    word_logits.view(-1, word_logits.size(-1)),
+                    word_target_ids[:, 1:].contiguous().view(-1),
                 )
 
-            # ----- Contrastive Learning with Fixed Noise Probability -----
-            with torch.no_grad():
-                # Tokenize with fixed noise probability (e.g., 0.5) for positive examples
-                (
-                    tokens_tensor_pos,
-                    attention_mask_tensor_pos,
-                    word_boundaries_pos,
-                    sequence_ids_pos,
-                    target_ids_pos,
-                    target_key_padding_mask_pos,
-                ) = prepare_batch(batch, tokenizer, config, device, noise_prob=0.5)
-
-                # Obtain embeddings for contrastive loss
-                embeddings_pos = model(
-                    x=tokens_tensor_pos,
-                    sequence_ids=torch.tensor(
-                        sequence_ids_pos, dtype=torch.long, device=device
-                    ),
-                    target_ids=target_ids_pos,
-                    target_key_padding_mask=target_key_padding_mask_pos,
-                    attention_mask=attention_mask_tensor_pos,
-                    word_boundaries=word_boundaries_pos,
-                    return_embeddings_only=True,  # Get embeddings only
-                )  # Shape: (batch_size, d_model)
-
-            # Prepare sentence_features for MultipleNegativesRankingLoss
-            # According to the class definition, the first element should be anchors,
-            # and the second element should be positives.
-            sentence_features = [
-                {"sentence_embedding": embeddings_anchor},
-                {"sentence_embedding": embeddings_pos},
-            ]
-
-            # Compute contrastive loss
-            contrastive_loss = contrastive_loss_fn(
-                sentence_features=sentence_features, labels=None
+            predictions = torch.argmax(seq_logits, dim=-1)
+            mask = seq_target_ids[:, 1:] != PAD_BYTE
+            correct_predictions = (
+                (predictions[mask] == seq_target_ids[:, 1:][mask]).sum().item()
             )
+            total_predictions = mask.sum().item()
+
+            # # ----- Contrastive Learning with Fixed Noise Probability -----
+            # with torch.no_grad():
+            #     with model.set_dropout(0.1):
+            #         # Obtain embeddings for contrastive loss
+            #         embeddings_pos = model(
+            #             x=tokens_tensor,
+            #             sequence_ids=sequence_ids,
+            #             target_ids=target_ids,
+            #             target_key_padding_mask=target_key_padding_mask,
+            #             attention_mask=attention_mask_tensor,
+            #             word_boundaries=word_boundaries,
+            #             return_embeddings_only=True,
+            #         )  # Shape: (batch_size, d_model)
+
+            # # Compute contrastive loss
+            # contrastive_loss = contrastive_loss_fn(
+            #     embeddings_anchor, embeddings_pos
+            # )
+            contrastive_loss = 0
 
             # ----- Combine Losses -----
             total_loss = (
-                reconstruction_loss + contrastive_loss
+                seq_reconstruction_loss + word_reconstruction_loss
             )  # You can weight them if needed
 
             # ----- Backpropagation -----
@@ -276,16 +279,23 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
             # ----- TensorBoard Logging -----
             if writer:
                 writer.add_scalar(
-                    "Loss/train_reconstruction", reconstruction_loss.item(), step
+                    "Seq Loss/train_reconstruction", seq_reconstruction_loss.item(), step
                 )
                 writer.add_scalar(
-                    "Loss/train_contrastive", contrastive_loss.item(), step
+                    "Word Loss/train_reconstruction", word_reconstruction_loss.item(), step
                 )
-                writer.add_scalar("Loss/train_total", total_loss.item(), step)
+
+                # writer.add_scalar(
+                #     "Loss/train_contrastive", contrastive_loss.item(), step
+                # )
+                #writer.add_scalar("Loss/train_total", total_loss.item(), step)
                 # Optional: Add more metrics as needed
                 writer.add_scalar("Prob/train", prob, step)
                 writer.add_scalar(
                     "LearningRate/train", optimizer.param_groups[0]["lr"], step
+                )
+                writer.add_scalar(
+                    "Accuracy/train", correct_predictions / total_predictions, step
                 )
 
             # ----- Save Checkpoint every N Steps -----
@@ -341,9 +351,9 @@ def main():
         warmup_steps=1000,
         output_dir="./checkpoints",
         max_sequence_length=64,
-        dataset_split="train[0:10000]",
-        dataset_name="HuggingFaceTB/smollm-corpus",
-        dataset_subset="fineweb-edu-dedup",
+        dataset_split="train",
+        dataset_name="skymizer/fineweb-edu-dedup-45B",
+        dataset_subset="default",
         seed=42,
         target_loss=0.2,  # Desired loss
         pid_Kp=1.0,  # Proportional gain
@@ -365,8 +375,8 @@ def main():
         training_config.dataset_name,
         training_config.dataset_subset,
         split=training_config.dataset_split,
-        data_dir="/home/datasets/HuggingFaceTB___smollm-corpus",
-        # download_config=DownloadConfig(resume_download=True),
+        cache_dir="/home/datasets/",
+        download_config=DownloadConfig(resume_download=True),
     )
     # dataset = dataset.filter(lambda x: x["text"] is not None and len(x["text"]) > 50)
 
