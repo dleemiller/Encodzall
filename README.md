@@ -24,6 +24,12 @@ EncodZall is an experimental transformer architecture that we hope will be a ver
 - **Simulated Noise**: After masked pretraining, the model will be fine-tuned with simulated noise to mimic OCR defects and common mispellings.
 - **PID Loop**: A proportional-integral-derivative (PID) loop adjusts the masking and noise strength to maintain a fixed loss during training.
 
+### PID Training
+- Using a PID loop offers several potential training benefits:
+   - obeservability of training objective saturation
+   - quantified denoising "capacity" at various architectural sizes
+   - maintaining achievable, challenging training objectives, preventing too hard or too easy objectives
+
 ## Architecture
 The architecture includes the following components:
 
