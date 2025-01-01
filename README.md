@@ -24,14 +24,14 @@ The architecture includes the following components:
 Refer to the diagram below for a visual representation:
 
 <p align="center">
-  <img src="docs/img/model_architecture.png" alt="Model Architecture" width="75%">
+  <img src="docs/img/model_architecture.png" alt="Model Architecture" width="50%">
 </p>
 
 ## Sequence Packing
 The sequence packing process ensures efficient computation by restricting attention to packed words. Below is a visualization of the sequence packing mask:
 
 <p align="center">
-  <img src="docs/img/seq_packing.png" alt="Sequence Packing Mask" width="75%">
+  <img src="docs/img/seq_packing.png" alt="Sequence Packing Mask" width="80%">
 </p>
 
 ## Future Plans
