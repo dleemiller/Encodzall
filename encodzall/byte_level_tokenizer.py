@@ -84,7 +84,8 @@ class ByteLevelTokenizer:
         # noise.keyboard - nearby keystrokes
         # noise.mask - masking with distinct masks consonants, non-whitespace (punc), vowels and either (general)
         # noise.mask - 0x06-0x0B
-        noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        #noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        noise_func = noise.mask
         return [noise_func(word, probability=noise_prob) for word in words]
 
     def encode_words(
