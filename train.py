@@ -1,7 +1,7 @@
-# training_script.py
 from datetime import datetime
 import os
 import json
+import pickle
 import math
 import torch
 import torch.nn as nn
@@ -10,7 +10,7 @@ from torch.amp import GradScaler, autocast
 from transformers import get_cosine_schedule_with_warmup
 from datasets import load_dataset, DownloadConfig
 from tqdm import tqdm
-from typing import Optional
+from typing import Optional, Tuple, Any, Dict
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 from simple_pid import PID
@@ -52,7 +52,14 @@ def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] 
         Tuple containing token_ids, attention_masks, word_boundaries, sequence_ids, target_ids, target_key_padding_mask
     """
     texts = batch["text"]
-    token_ids, attention_masks, word_boundaries, sequence_ids, seq_target_ids, word_target_ids = (
+    (
+        token_ids,
+        attention_masks,
+        word_boundaries,
+        sequence_ids,
+        seq_target_ids,
+        word_target_ids,
+    ) = (
         [],
         [],
         [],
@@ -155,10 +162,174 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, scaler, config
         else:
             raise ValueError("Config missing from checkpoint and not provided.")
 
-    return checkpoint["step"], config, pid, prob, dataset_offset
+    # load from checkpoint step + 1
+    return checkpoint["step"] + 1, config, pid, prob, dataset_offset + 1
 
 
-def train(model, tokenizer, dataset, config, device, checkpoint_path=None, writer=None):
+def save_failure_data(
+    failure_dir: str,
+    step: int,
+    batch: Dict[str, Any],
+    inputs: Dict[str, Any],
+    exception: Exception,
+):
+    """Save inputs and batch text to a file for debugging."""
+    os.makedirs(failure_dir, exist_ok=True)
+    failure_data = {
+        "step": step,
+        "batch_text": batch.get("text", []),
+        "inputs": {
+            k: v.tolist() if isinstance(v, torch.Tensor) else v
+            for k, v in inputs.items()
+        },
+        "exception": str(exception),
+    }
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    failure_file = os.path.join(failure_dir, f"failure_step_{step}_{timestamp}.pkl")
+    with open(failure_file, "w") as f:
+        pickle.dump(failure_data, f, indent=4)
+    print(f"Saved failure data to {failure_file}")
+
+
+def train_step(
+    model: nn.Module,
+    tokenizer: ByteLevelTokenizer,
+    batch_inputs: tuple[str, Any],
+    config: TrainingConfig,
+    device: torch.device,
+    optimizer: optim.Optimizer,
+    scaler: GradScaler,
+    scheduler: Any,
+    reconstruction_loss_fn: nn.Module,
+    contrastive_loss_fn: Optional[nn.Module],
+    pid: PID,
+    prob: float,
+    seq_weight: float = 0.75,
+    word_weight: float = 0.25,
+) -> Tuple[float, float, float, float, float]:
+    """
+    Perform a single training step.
+
+    Args:
+        model (nn.Module): The model to train.
+        tokenizer (ByteLevelTokenizer): The tokenizer.
+        batch (dict): The batch data.
+        config (TrainingConfig): Training configuration.
+        device (torch.device): Device to run on.
+        optimizer (optim.Optimizer): Optimizer.
+        scaler (GradScaler): Gradient scaler for AMP.
+        scheduler (Any): Learning rate scheduler.
+        reconstruction_loss_fn (nn.Module): Loss function for reconstruction.
+        contrastive_loss_fn (Optional[nn.Module]): Loss function for contrastive learning.
+        pid (PID): PID controller for noise probability.
+        prob (float): Current noise probability.
+
+    Returns:
+        Tuple containing losses, accuracy, and updated noise probability.
+    """
+    # Prepare the batch
+    (
+        tokens_tensor,
+        attention_mask_tensor,
+        word_boundaries,
+        sequence_ids,
+        seq_target_ids,
+        seq_key_padding_mask,
+        word_target_ids,
+        word_key_padding_mask,
+    ) = batch_inputs
+
+
+    optimizer.zero_grad()
+    with autocast("cuda"):
+        sequence_ids_tensor = torch.tensor(
+            sequence_ids, dtype=torch.long, device=device
+        )
+        outputs = model(
+            x=tokens_tensor,
+            sequence_ids=sequence_ids_tensor,
+            seq_target_ids=seq_target_ids,
+            seq_key_padding_mask=seq_key_padding_mask,
+            word_target_ids=word_target_ids,
+            word_key_padding_mask=word_key_padding_mask,
+            attention_mask=attention_mask_tensor,
+            word_boundaries=word_boundaries,
+
+        )
+        # Assuming model returns (something, seq_logits, word_logits)
+        _, seq_logits, word_logits = outputs
+
+        # Compute reconstruction loss
+        seq_reconstruction_loss = reconstruction_loss_fn(
+            seq_logits.view(-1, seq_logits.size(-1)),
+            seq_target_ids[:, 1:].contiguous().view(-1),
+        )
+        word_reconstruction_loss = reconstruction_loss_fn(
+            word_logits.view(-1, word_logits.size(-1)),
+            word_target_ids[:, 1:].contiguous().view(-1),
+        )
+
+    # Compute accuracy
+    predictions = torch.argmax(seq_logits, dim=-1)
+    mask = seq_target_ids[:, 1:] != PAD_BYTE
+    correct_predictions = (
+        (predictions[mask] == seq_target_ids[:, 1:][mask]).sum().item()
+    )
+    total_predictions = mask.sum().item()
+    accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0.0
+
+    # Contrastive loss (if applicable)
+    if contrastive_loss_fn is not None:
+        with torch.no_grad():
+            with model.set_dropout(0.1):
+                embeddings_pos = model(
+                    x=tokens_tensor,
+                    sequence_ids=sequence_ids_tensor,
+                    seq_target_ids=seq_target_ids,
+                    seq_key_padding_mask=seq_key_padding_mask,
+                    word_target_ids=word_target_ids,
+                    word_key_padding_mask=word_key_padding_mask,
+                    attention_mask=attention_mask_tensor,
+                    return_embeddings_only=True,
+                )
+        contrastive_loss = contrastive_loss_fn(embeddings_anchor, embeddings_pos)
+    else:
+        contrastive_loss = 0.0
+
+    # Combine Losses
+    reconstruction_loss = (seq_weight * seq_reconstruction_loss + word_weight * word_reconstruction_loss) / (seq_weight + word_weight)
+    total_loss = reconstruction_loss + contrastive_loss
+
+    # Backpropagation
+    scaler.scale(total_loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+    scheduler.step()
+
+    # PID Controller for Noise Probability
+    pid_output = pid(total_loss.item())
+    prob = min(max(prob + pid_output, config.prob_min), config.prob_max)
+    tokenizer.noise_config.set_prob(prob)
+
+    return (
+        seq_reconstruction_loss.item(),
+        word_reconstruction_loss.item(),
+        contrastive_loss,
+        total_loss.item(),
+        accuracy,
+        prob,
+    )
+
+
+def train(
+    model: nn.Module,
+    tokenizer: ByteLevelTokenizer,
+    dataset,
+    config: TrainingConfig,
+    device: torch.device,
+    checkpoint_path: Optional[str] = None,
+    writer: Optional[SummaryWriter] = None,
+):
     model.train()
     model.to(device)
 
@@ -173,7 +344,8 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
     reconstruction_loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
 
     # Initialize the contrastive loss
-    contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
+    #contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
+    contrastive_loss_fn = None
 
     pid = PID(config.pid_Kp, config.pid_Ki, config.pid_Kd, setpoint=config.target_loss)
     pid.output_limits = (config.prob_min, config.prob_max)
@@ -191,134 +363,115 @@ def train(model, tokenizer, dataset, config, device, checkpoint_path=None, write
 
         # Apply offset for resumption
         if dataset_offset > 0:
-            dataset_offset = 10780
             dataset = dataset.skip(dataset_offset)
 
     step = start_step
+    failure_dir = os.path.join(config.output_dir, "failures")
     for epoch in range(config.num_epochs):
         print(f"Epoch {epoch + 1}/{config.num_epochs}")
 
         for batch in tqdm(dataset.batch(config.batch_size), desc=f"Training"):
-            (
-                tokens_tensor,
-                attention_mask_tensor,
-                word_boundaries,
-                sequence_ids,
-                seq_target_ids,
-                seq_key_padding_mask,
-                word_target_ids,
-                word_key_padding_mask,
-            ) = prepare_batch(batch, tokenizer, config, device)
-
-            optimizer.zero_grad()
-            with autocast("cuda"):
-                sequence_ids = torch.tensor(sequence_ids, dtype=torch.long, device=device)
-                _, seq_logits, word_logits = model(
-                    x=tokens_tensor,
-                    sequence_ids=sequence_ids,
-                    seq_target_ids=seq_target_ids,
-                    seq_key_padding_mask=seq_key_padding_mask,
-                    word_target_ids=word_target_ids,
-                    word_key_padding_mask=word_key_padding_mask,
-                    attention_mask=attention_mask_tensor,
-                    word_boundaries=word_boundaries,
-                )
-                # Compute reconstruction loss
-                seq_reconstruction_loss = reconstruction_loss_fn(
-                    seq_logits.view(-1, seq_logits.size(-1)),
-                    seq_target_ids[:, 1:].contiguous().view(-1),
-                )
-                word_reconstruction_loss = reconstruction_loss_fn(
-                    word_logits.view(-1, word_logits.size(-1)),
-                    word_target_ids[:, 1:].contiguous().view(-1),
-                )
-
-            predictions = torch.argmax(seq_logits, dim=-1)
-            mask = seq_target_ids[:, 1:] != PAD_BYTE
-            correct_predictions = (
-                (predictions[mask] == seq_target_ids[:, 1:][mask]).sum().item()
-            )
-            total_predictions = mask.sum().item()
-
-            # # ----- Contrastive Learning with Fixed Noise Probability -----
-            # with torch.no_grad():
-            #     with model.set_dropout(0.1):
-            #         # Obtain embeddings for contrastive loss
-            #         embeddings_pos = model(
-            #             x=tokens_tensor,
-            #             sequence_ids=sequence_ids,
-            #             target_ids=target_ids,
-            #             target_key_padding_mask=target_key_padding_mask,
-            #             attention_mask=attention_mask_tensor,
-            #             word_boundaries=word_boundaries,
-            #             return_embeddings_only=True,
-            #         )  # Shape: (batch_size, d_model)
-
-            # # Compute contrastive loss
-            # contrastive_loss = contrastive_loss_fn(
-            #     embeddings_anchor, embeddings_pos
-            # )
-            contrastive_loss = 0
-
-            # ----- Combine Losses -----
-            total_loss = (
-                seq_reconstruction_loss + word_reconstruction_loss
-            )  # You can weight them if needed
-
-            # ----- Backpropagation -----
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-
-            # ----- PID Controller for Noise Probability -----
-            pid_output = pid(total_loss.item())
-            prob = min(max(prob + pid_output, config.prob_min), config.prob_max)
-            tokenizer.noise_config.set_prob(prob)
-
-            # ----- TensorBoard Logging -----
-            if writer:
-                writer.add_scalar(
-                    "Seq Loss/train_reconstruction", seq_reconstruction_loss.item(), step
-                )
-                writer.add_scalar(
-                    "Word Loss/train_reconstruction", word_reconstruction_loss.item(), step
-                )
-
-                # writer.add_scalar(
-                #     "Loss/train_contrastive", contrastive_loss.item(), step
-                # )
-                #writer.add_scalar("Loss/train_total", total_loss.item(), step)
-                # Optional: Add more metrics as needed
-                writer.add_scalar("Prob/train", prob, step)
-                writer.add_scalar(
-                    "LearningRate/train", optimizer.param_groups[0]["lr"], step
-                )
-                writer.add_scalar(
-                    "Accuracy/train", correct_predictions / total_predictions, step
-                )
-
-            # ----- Save Checkpoint every N Steps -----
-            if step > 0 and step % config.checkpoint_interval == 0:
-                dataset_offset = (step * config.batch_size) % len(dataset)
-                checkpoint_path_step = os.path.join(
-                    config.output_dir, f"model_step_{step}.pth"
-                )
-                save_checkpoint(
-                    checkpoint_path_step,
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    pid,
-                    step,
-                    config,
+            try:
+                batch_inputs = prepare_batch(batch, tokenizer, config, device, noise_prob=prob)
+                # Perform a training step
+                (
+                    seq_loss,
+                    word_loss,
+                    contrastive_loss,
+                    total_loss,
+                    accuracy,
                     prob,
-                    dataset_offset,
+                ) = train_step(
+                    model=model,
+                    tokenizer=tokenizer,
+                    batch_inputs=batch_inputs,
+                    config=config,
+                    device=device,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    scheduler=scheduler,
+                    reconstruction_loss_fn=reconstruction_loss_fn,
+                    contrastive_loss_fn=contrastive_loss_fn,
+                    pid=pid,
+                    prob=prob,
                 )
-                print(f"Saved checkpoint to {checkpoint_path_step}")
 
-            step += 1
+                # ----- TensorBoard Logging -----
+                if writer:
+                    writer.add_scalar("Seq Loss/train_reconstruction", seq_loss, step)
+                    writer.add_scalar("Word Loss/train_reconstruction", word_loss, step)
+                    if contrastive_loss_fn is not None:
+                        writer.add_scalar(
+                            "Loss/train_contrastive", contrastive_loss.item(), step
+                        )
+                    writer.add_scalar("Loss/train_total", total_loss, step)
+                    writer.add_scalar("Prob/train", prob, step)
+                    writer.add_scalar(
+                        "LearningRate/train", optimizer.param_groups[0]["lr"], step
+                    )
+                    writer.add_scalar("Accuracy/train", accuracy, step)
+
+                # ----- Save Checkpoint every N Steps -----
+                if step > 0 and step % config.checkpoint_interval == 0:
+                    dataset_offset = (step * config.batch_size) % len(dataset)
+                    checkpoint_path_step = os.path.join(
+                        config.output_dir, f"model_step_{step}.pth"
+                    )
+                    save_checkpoint(
+                        checkpoint_path_step,
+                        model,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        pid,
+                        step,
+                        config,
+                        prob,
+                        dataset_offset,
+                    )
+                    print(f"Saved checkpoint to {checkpoint_path_step}")
+
+                step += 1
+
+            except Exception as e:
+                import traceback
+                print(f"Error at step {step}: {e}")
+                print(traceback.format_exc())
+                try:
+                    (
+                        tokens_tensor,
+                        attention_mask_tensor,
+                        word_boundaries,
+                        sequence_ids,
+                        seq_target_ids,
+                        seq_key_padding_mask,
+                        word_target_ids,
+                        word_key_padding_mask,
+                    ) = batch_inputs
+
+                    # Capture all model inputs and batch text
+                    inputs = {
+                        "batch_text": batch,
+                        "tokens_tensor": tokens_tensor.cpu(),
+                        "attention_mask_tensor": attention_mask_tensor.cpu(),
+                        "word_boundaries": word_boundaries,
+                        "sequence_ids": sequence_ids,
+                        "seq_target_ids": seq_target_ids.cpu(),
+                        "seq_key_padding_mask": seq_key_padding_mask.cpu(),
+                        "word_target_ids": word_target_ids.cpu(),
+                        "word_key_padding_mask": word_key_padding_mask.cpu(),
+                    }
+                    save_failure_data(failure_dir, step, batch, inputs, e)
+                    # Optionally, log the exception to TensorBoard or other logging systems
+                    if writer:
+                        writer.add_text("Errors/train", f"Step {step}: {str(e)}", step)
+                except:
+                    print(traceback.format_exc())
+                    print("Failed to save failure data")
+                # Continue training
+                step += 1
+                continue
+
         print(f"Completed epoch {epoch + 1}")
         dataset_offset = 0
     print("Training complete.")
@@ -354,6 +507,9 @@ def main():
         dataset_split="train",
         dataset_name="skymizer/fineweb-edu-dedup-45B",
         dataset_subset="default",
+        #dataset_subset="20231101.en",
+        #dataset_name="wikimedia/wikipedia",
+        #dataset_split="train[0:1000]",
         seed=42,
         target_loss=0.2,  # Desired loss
         pid_Kp=1.0,  # Proportional gain

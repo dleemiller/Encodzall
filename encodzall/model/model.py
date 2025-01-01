@@ -71,9 +71,9 @@ class Encodzall(nn.Module):
         # Word Decoder
         word_decoder_layer = nn.TransformerDecoderLayer(
             d_model=config.d_model,
-            nhead=config.nhead,
+            nhead=1,
             dim_feedforward=config.dim_feedforward,
-            dropout=config.dropout,
+            dropout=0.05,
             activation=config.activation,
             batch_first=True,
             norm_first=True,
@@ -211,8 +211,7 @@ class Encodzall(nn.Module):
         Returns:
             tuple: (mask tensor, indices tensor)
         """
-        tensor = torch.tensor(sequence_ids)
-        mask = tensor[:-1] != tensor[1:]
+        mask = sequence_ids[:-1] != sequence_ids[1:]
         mask = torch.cat([mask, torch.tensor([True]).to(sequence_ids.device)])
         return ~mask
 
@@ -224,8 +223,8 @@ class Encodzall(nn.Module):
         seq_key_padding_mask: torch.Tensor,
         word_target_ids: torch.Tensor,
         word_key_padding_mask: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        word_boundaries: Optional[List[List[Tuple[int, int]]]] = None,
+        attention_mask: torch.Tensor,
+        word_boundaries: List[List[Tuple[int, int]]],
         return_embeddings_only: bool = False,  # Added flag
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -254,7 +253,7 @@ class Encodzall(nn.Module):
         embedded = self.embedding(x.long())  # Shape: (batch_size, seq_length, d_model)
 
         # Pass through the first encoder
-        encoder1_output = self.encoder1(embedded, attn_mask=attention_mask)
+        encoder1_output = self.encoder1(embedded, attn_mask=attention_mask.bool())
 
         # Perform word pooling
         pooled_word_vectors = self.word_pooling(
@@ -268,7 +267,7 @@ class Encodzall(nn.Module):
         memory_attn_mask = self.key_padding_to_attention_mask(memory_key_padding_mask)
 
         # Pass through the second encoder
-        memory = self.encoder2(encoder1_output, attn_mask=memory_attn_mask)
+        memory = self.encoder2(encoder1_output, attn_mask=memory_attn_mask.bool())
         # Note: Positional encoding will be added after average pooling
 
         # ------------------------- Average Pooling Step Moved to Separate Function -------------------------
@@ -304,9 +303,9 @@ class Encodzall(nn.Module):
         seq_decoder_output = self.decoder(
             tgt=seq_target_embedded + seq_target_positions,
             memory=memory + memory_positions,
-            tgt_mask=seq_causal_mask,
-            memory_key_padding_mask=memory_key_padding_mask,
-            tgt_key_padding_mask=seq_key_padding_mask,
+            tgt_mask=seq_causal_mask.bool(),
+            memory_key_padding_mask=memory_key_padding_mask.bool(),
+            tgt_key_padding_mask=seq_key_padding_mask.bool(),
         )
 
         # Embed target tokens
@@ -329,18 +328,18 @@ class Encodzall(nn.Module):
         word_memory = word_memory[eos_mask]
 
         # Pass through the decoder
-        print(
-            word_target_embedded.shape,
-            word_target_positions.shape,
-            word_memory.shape,
-            word_key_padding_mask.shape,
-        )
+        # print(
+        #     word_target_embedded.shape,
+        #     word_target_positions.shape,
+        #     word_memory.shape,
+        #     word_key_padding_mask.shape,
+        # )
         word_decoder_output = self.decoder(
             tgt=word_target_embedded + word_target_positions,
             memory=word_memory,
-            tgt_mask=word_causal_mask,
+            tgt_mask=word_causal_mask.bool(),
             memory_key_padding_mask=None,
-            tgt_key_padding_mask=word_key_padding_mask,
+            tgt_key_padding_mask=word_key_padding_mask.bool(),
         )
 
         # Compute logits
