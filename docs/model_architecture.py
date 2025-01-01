@@ -38,27 +38,27 @@ def create_optimized_model_diagram(output_path="img/model_architecture"):
     dot.node(
         "Encoder1",
         "Transformer Encoder 1\n(RoPE)",
-        fillcolor="lightpink",
+        fillcolor="lightskyblue",
         fontsize="12",
     )
     dot.edge("Embedding", "Encoder1")
 
     # Word Pooling
     dot.node("WordPooling", "Word Pooling")
-    dot.edge("Encoder1", "WordPooling")
+    dot.edge("Encoder1", "Unpad")
 
     # Unpadding
     dot.node("Unpad", "Unpad Sequences")
-    dot.edge("WordPooling", "Unpad")
+    dot.edge("Unpad", "WordPooling")
 
     # Encoder 2
     dot.node(
         "Encoder2",
         "Transformer Encoder 2\n(RoPE)",
-        fillcolor="lightpink",
+        fillcolor="lightskyblue",
         fontsize="12",
     )
-    dot.edge("Unpad", "Encoder2")
+    dot.edge("WordPooling", "Encoder2")
 
     # Average Pooling
     dot.node(
