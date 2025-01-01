@@ -61,52 +61,42 @@ def create_optimized_model_diagram(output_path="img/model_architecture"):
     dot.edge("Unpad", "Encoder2")
 
     # Average Pooling
-    dot.node("AveragePooling", "Average Pooling", width="2.0", height="0.6")
+    dot.node(
+        "AveragePooling", "Average Pooling\n(Packed Words)", width="2.0", height="0.6"
+    )
     dot.edge("Encoder2", "AveragePooling")
 
     # Decoders
+    dot.node("WordDecoder", "Word Decoder", fillcolor="lightgreen", fontsize="12")
+    dot.edge("AveragePooling", "WordDecoder")
+
     dot.node(
         "SequenceDecoder", "Sequence Decoder", fillcolor="lightgreen", fontsize="12"
     )
-    dot.edge("AveragePooling", "SequenceDecoder")
-
-    dot.node("WordDecoder", "Word Decoder", fillcolor="lightgreen", fontsize="12")
-    dot.edge("Encoder2", "WordDecoder")
+    dot.edge("Encoder2", "SequenceDecoder")
 
     # Output Layers
-    dot.node("OutputSeq", "Sequence Output Layer", fillcolor="lightgray", fontsize="12")
+    dot.node("OutputWord", "Word Output Layer", fillcolor="lightgray", fontsize="12")
     dot.edge(
-        "SequenceDecoder",
-        "OutputSeq",
-        label="Predicted Tokens",
+        "WordDecoder",
+        "OutputWord",
+        label="Predicted Chars",
         fontsize="10",
         labeldistance="1.5",
         labelangle="30",
     )
 
-    dot.node("OutputWord", "Word Output Layer", fillcolor="lightgray", fontsize="12")
+    dot.node("OutputSeq", "Sequence Output Layer", fillcolor="lightgray", fontsize="12")
     dot.edge(
-        "WordDecoder",
-        "OutputWord",
-        label="Predicted Words",
+        "SequenceDecoder",
+        "OutputSeq",
+        label="Predicted Chars",
         fontsize="10",
         labeldistance="1.5",
         labelangle="-30",
     )
 
     # Cross-Entropy Loss
-    dot.node(
-        "SeqLoss",
-        "Cross-Entropy Loss\n(Sequence)",
-        shape="box",
-        style="dashed, rounded",
-        fillcolor="white",
-        fontsize="12",
-        width="2.0",
-        height="0.6",
-    )
-    dot.edge("OutputSeq", "SeqLoss", label="Logits", fontsize="10")
-
     dot.node(
         "WordLoss",
         "Cross-Entropy Loss\n(Word)",
@@ -118,6 +108,18 @@ def create_optimized_model_diagram(output_path="img/model_architecture"):
         height="0.6",
     )
     dot.edge("OutputWord", "WordLoss", label="Logits", fontsize="10")
+
+    dot.node(
+        "SeqLoss",
+        "Cross-Entropy Loss\n(Sequence)",
+        shape="box",
+        style="dashed, rounded",
+        fillcolor="white",
+        fontsize="12",
+        width="2.0",
+        height="0.6",
+    )
+    dot.edge("OutputSeq", "SeqLoss", label="Logits", fontsize="10")
 
     # Group Labels
     dot.node("EncodersLabel", "Encoders", shape="plaintext", fontsize="14")
