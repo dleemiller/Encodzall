@@ -69,7 +69,7 @@ class ByteLevelTokenizer:
         Returns:
             list[str]: list of tokens with preserved trailing whitespace.
         """
-        return re.findall(r"\S+\s*", text)
+        return re.findall(r"[\s]*\S+[\s\-]*", text)
 
     def apply_noise_to_words(
         self, words: list[str], noise_prob: float = 0.0
@@ -84,11 +84,12 @@ class ByteLevelTokenizer:
         # noise.keyboard - nearby keystrokes
         # noise.mask - masking with distinct masks consonants, non-whitespace (punc), vowels and either (general)
         # noise.mask - 0x06-0x0B
-        noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        #noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        noise_func = noise.mask
         return [noise_func(word, probability=noise_prob) for word in words]
 
     def encode_words(
-        self, words: list[str], target_min_len: int = 8, word_break: int = 16
+        self, words: list[str], target_min_len: int = 12, word_break: int = 12
     ) -> list[list[int]]:
         """
         Encode each word into its corresponding byte values (0-255).
@@ -110,7 +111,7 @@ class ByteLevelTokenizer:
         # Break long sequences into chunks of size `word_break`
         chunked_sequences = []
         for seq in byte_sequences:
-            chunked_sequences.extend(more_itertools.chunked(seq, word_break))
+            chunked_sequences.extend(more_itertools.chunked_even(seq, word_break))
 
         # Collect short word sequences into groups of at least `target_min_len` bytes
         constrained = list(
@@ -149,6 +150,8 @@ class ByteLevelTokenizer:
         # Constrain the chunks so that each batch doesn't exceed self.max_sequence_length
         # NOTE: setting strict=True will omit any leftover if it doesn't fit exactly,
         # which might be desirable or not. We'll keep it True for uniform blocks.
+        if add_eos:
+            byte_sequences.append([EOS_BYTE])
         chunk_batches = list(
             more_itertools.constrained_batches(
                 byte_sequences,
@@ -178,13 +181,6 @@ class ByteLevelTokenizer:
 
             # Flatten the chunks
             flattened = list(more_itertools.flatten(augmented_batch))
-
-            # Possibly add [EOS]
-            if add_eos:
-                if len(flattened) < self.max_sequence_length:
-                    flattened.append(EOS_BYTE)
-                    # The last boundary becomes the [EOS] location
-                    word_boundaries.append((len(flattened) - 1, len(flattened)))
 
             # Pad if needed
             if len(flattened) < self.max_sequence_length:
@@ -236,7 +232,7 @@ class ByteLevelTokenizer:
         Returns:
             list[list[int]]: For each sub-list, a new list with [BOS] + original sequence.
         """
-        return [BOS_BYTE] + list(more_itertools.flatten(byte_sequences))
+        return list(more_itertools.flatten(byte_sequences))
 
     def pad_targets(
         self, target_ids: list[list[int]]
@@ -256,6 +252,17 @@ class ByteLevelTokenizer:
             [torch.tensor(t, dtype=torch.uint8) for t in target_ids]
         )
         padded_targets = nested_tensor.to_padded_tensor(padding=PAD_BYTE)
+
+        # Create a tensor filled with EOS_BYTE of shape (batch_size, 1)
+        eos_column = torch.full(
+            (padded_targets.size(0), 1),
+            EOS_BYTE,
+            dtype=torch.uint8,
+        )
+
+        # Concatenate the EOS column to the original tensor along dimension 1 (sequence length)
+        padded_targets = torch.cat((eos_column, padded_targets), dim=1)
+
         key_padding_mask = padded_targets == PAD_BYTE
         return padded_targets, key_padding_mask
 
@@ -285,7 +292,8 @@ class ByteLevelTokenizer:
         truncate_len: int = 320,
         char_len: int = 2048,
         mask_prob: bool = 0.0,
-        noise_prob: float = 0.0,
+        noise_prob: float | None = None,
+        return_byte_seq: bool = False,
     ) -> tuple[
         torch.Tensor, torch.Tensor, list[list[tuple[int, int]]], list[list[int]]
     ]:
@@ -328,8 +336,8 @@ class ByteLevelTokenizer:
             words = words[:truncate_len]
 
         # 4) Optionally apply noise
-        if noise_prob or self.noise_config.noise_prob:
-            noise_prob = max(noise_prob, self.noise_config.noise_prob)
+        if noise_prob or self.noise_config.noise_prob > 0:
+            noise_prob = noise_prob or self.noise_config.noise_prob
             assert 0 <= noise_prob <= 1
             noised_words = self.apply_noise_to_words(words, noise_prob=noise_prob)
         else:
@@ -337,6 +345,8 @@ class ByteLevelTokenizer:
 
         # 5) Encode words (noised for the actual input)
         byte_sequences_noised = self.encode_words(noised_words)
+        if return_byte_seq:
+            return byte_sequences_noised
 
         # 6) Pack these sequences
         packed_sequences, word_boundaries_list = self.pack_sequences(
@@ -353,10 +363,18 @@ class ByteLevelTokenizer:
 
         # 8) Create targets (non-noised) & then return them raw (or can be padded later)
         #    We re-encode the original words to get the full non-noised bytes:
-        byte_sequences_original = self.encode_words(words)
-        targets = self.create_targets(byte_sequences_original)
+        targets = self.encode_words(words)
+        # targets = self.create_targets(byte_sequences_original)
 
-        return token_tensor, attention_mask, word_boundaries_list, targets
+        # seq_target_ids = torch.nested.nested_tensor(
+        #     list(more_itertools.flatten(x)) for x in byte_sequences_original
+        # )
+        # seq_target_ids
+        # word_target_ids = torch.cat(
+        #     list(torch.nested.nested_tensor(x) for x in byte_sequences_original)
+        # )
+
+        return (token_tensor, attention_mask, word_boundaries_list, targets)
 
     def get_special_tokens(self) -> dict[int, str]:
         """
@@ -370,12 +388,12 @@ if __name__ == "__main__":
     tokenizer = ByteLevelTokenizer(max_sequence_length=64)
     # sample_text = "Hello world! This is a sample text to encode. Tokenize the input text into byte token IDs and create the corresponding attention mask."
     sample_text = "I Hello world! I am a cat!"
-    tokens, mask, boundaries, targets = tokenizer.tokenize(
+    tokens, mask, boundaries, seq_targets, word_targets = tokenizer.tokenize(
         sample_text, mask_prob=0.0, noise_prob=0.3
     )
     print("Token IDs:\n", tokens)
     print("Attention Mask:\n", mask)
-    print("Target IDs:\n", targets)
+    print("Target IDs:\n", seq_targets, "\nWord Target IDs:\n", word_targets)
     # import matplotlib.pyplot as plt
     # plt.imshow(mask[0])
     # plt.show()
