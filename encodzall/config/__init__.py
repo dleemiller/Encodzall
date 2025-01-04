@@ -23,6 +23,7 @@ class TransformerConfig:
     # Optional Parameters (Default to None)
     num_kv_heads_encoder1: Optional[int] = None
     num_kv_heads_encoder2: Optional[int] = None
+    num_kv_heads_decoder: Optional[int] = None
 
 
 # Configurations
