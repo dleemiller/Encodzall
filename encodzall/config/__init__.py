@@ -15,6 +15,7 @@ class TransformerConfig:
     activation: str
     dim_feedforward: int
     dropout: float
+    attn_dropout: float
     max_seq_length_encoder1: int
     max_seq_length_encoder2: int
     max_seq_length_decoder: int
@@ -39,6 +40,7 @@ encodzall_xs = TransformerConfig(
     activation="gelu",
     dim_feedforward=1024,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,
     max_seq_length_decoder=4096,
@@ -56,6 +58,7 @@ encodzall_s = TransformerConfig(
     activation="gelu",
     dim_feedforward=1536,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,
     max_seq_length_decoder=4096,
@@ -73,6 +76,7 @@ encodzall_l = TransformerConfig(
     activation="gelu",
     dim_feedforward=4096,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=2048,
     max_seq_length_decoder=4096,

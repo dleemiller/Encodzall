@@ -38,7 +38,7 @@ class Encodzall(nn.Module):
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            attn_dropout=config.dropout,  # Adjust as needed
+            attn_dropout=config.attn_dropout,
             max_seq_len=config.max_seq_length_encoder1,
             is_causal=False,
         )
@@ -50,7 +50,7 @@ class Encodzall(nn.Module):
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            attn_dropout=config.dropout,  # Adjust as needed
+            attn_dropout=config.attn_dropout,
             max_seq_len=config.max_seq_length_encoder2,
             is_causal=False,
         )
@@ -76,7 +76,7 @@ class Encodzall(nn.Module):
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            attn_dropout=config.dropout,  # Adjust as needed
+            attn_dropout=config.attn_dropout,
             max_seq_len=config.max_seq_length_decoder,
             is_causal=True,
         )
@@ -99,8 +99,8 @@ class Encodzall(nn.Module):
             num_kv_heads=1,
             head_dim=self.d_model,
             dim_feedforward=config.dim_feedforward,
-            dropout=0.05,
-            attn_dropout=0.05,
+            dropout=0.0,
+            attn_dropout=0.1,
             max_seq_len=64,
             is_causal=True,
         )

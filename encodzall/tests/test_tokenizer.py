@@ -1,5 +1,5 @@
 import unittest
-import tokenizer
+from ..byte_level_tokenizer import ByteLevelTokenizer
 
 
 class TestCTokenizer(unittest.TestCase):
