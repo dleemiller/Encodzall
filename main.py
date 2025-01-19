@@ -9,7 +9,7 @@ from encodzall import encodzall_xs, Encodzall, ByteLevelTokenizer
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
 from encodzall.training.utils import set_seed
-from encodzall.training.trainer import train
+from encodzall.training.trainer2 import train
 
 
 def parse_args():
@@ -50,37 +50,11 @@ def parse_args():
 
 def get_training_config(output_dir: str) -> TrainingConfig:
     """Initialize training configuration."""
-    # return TrainingConfig(
-    #     num_epochs=1,  # Adjust as needed
-    #     batch_size=80,
-    #     learning_rate=2e-4,
-    #     warmup_steps=2500,
-    #     output_dir="./checkpoints",
-    #     max_sequence_length=64,
-    #     dataset_split="train",
-    #     dataset_name="skymizer/fineweb-edu-dedup-45B",
-    #     dataset_subset="default",
-    #     # dataset_subset="20231101.en",
-    #     # dataset_name="wikimedia/wikipedia",
-    #     # dataset_split="train[0:1000]",
-    #     seed=42,
-    #     target_loss=0.2,  # Desired loss
-    #     pid_Kp=1.0,  # Proportional gain
-    #     pid_Ki=0.1,  # Integral gain
-    #     pid_Kd=0.05,  # Derivative gain
-    #     prob_initial=0.0,  # Initial total noise + mask probability
-    #     prob_min=0.0,  # Minimum total probability
-    #     prob_max=1.0,  # Maximum total probability
-    #     mask_ratio=0.2,  # Fixed ratio for masking
-    #     noise_ratio=0.8,  # Fixed ratio for noise
-    #     checkpoint_interval=2000,
-    # )
-    # contrastive
     return TrainingConfig(
         num_epochs=1,  # Adjust as needed
-        batch_size=256,
-        learning_rate=1e-4,
-        warmup_steps=0,
+        batch_size=96,
+        learning_rate=3e-4,
+        warmup_steps=2500,
         output_dir="./checkpoints",
         max_sequence_length=64,
         dataset_split="train",
@@ -97,10 +71,36 @@ def get_training_config(output_dir: str) -> TrainingConfig:
         prob_initial=0.0,  # Initial total noise + mask probability
         prob_min=0.0,  # Minimum total probability
         prob_max=1.0,  # Maximum total probability
-        mask_ratio=0.0,  # Fixed ratio for word masking
-        noise_ratio=1.0,  # Fixed ratio for character noise
+        mask_ratio=0.2,  # Fixed ratio for masking
+        noise_ratio=0.8,  # Fixed ratio for noise
         checkpoint_interval=2000,
     )
+    # # contrastive
+    # return TrainingConfig(
+    #     num_epochs=1,  # Adjust as needed
+    #     batch_size=224,
+    #     learning_rate=1e-4,
+    #     warmup_steps=0,
+    #     output_dir="./checkpoints",
+    #     max_sequence_length=64,
+    #     dataset_split="train",
+    #     dataset_name="skymizer/fineweb-edu-dedup-45B",
+    #     dataset_subset="default",
+    #     # dataset_subset="20231101.en",
+    #     # dataset_name="wikimedia/wikipedia",
+    #     # dataset_split="train[0:1000]",
+    #     seed=42,
+    #     target_loss=0.2,  # Desired loss
+    #     pid_Kp=0.02,  # Proportional gain
+    #     pid_Ki=0.002,  # Integral gain
+    #     pid_Kd=0.001,  # Derivative gain
+    #     prob_initial=0.2,  # Initial total noise + mask probability
+    #     prob_min=0.0,  # Minimum total probability
+    #     prob_max=1.0,  # Maximum total probability
+    #     mask_ratio=0.0,  # Fixed ratio for word masking
+    #     noise_ratio=1.0,  # Fixed ratio for character noise
+    #     checkpoint_interval=2000,
+    # )
 
 
 def setup_dataset(config: TrainingConfig, cache_dir: str):
@@ -161,6 +161,7 @@ def main():
             checkpoint_path=args.checkpoint,
             weights_only=args.weights_only,
             writer=writer,
+            #stage=1
         )
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")

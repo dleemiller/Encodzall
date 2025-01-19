@@ -95,7 +95,7 @@ class TransformerEncoder(nn.Module):
                 mlp=mlp,
                 sa_norm=sa_norm,
                 mlp_norm=mlp_norm,
-                sa_scale=None,   # Optional gating or scaling (e.g., TanhGate, etc.)
+                sa_scale=None,  # Optional gating or scaling (e.g., TanhGate, etc.)
                 mlp_scale=None,  # Optional gating or scaling
             )
             self.layers.append(layer)
@@ -126,4 +126,3 @@ class TransformerEncoder(nn.Module):
             x = layer(x, mask=attn_mask, input_pos=input_pos)
 
         return x
-

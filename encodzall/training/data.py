@@ -71,11 +71,6 @@ def prepare_batch_stage2(
     """
     texts = batch["text"]
 
-    ## Optionally set anchor noise if provided (or you could rely on your PID outside)
-    # old_prob = tokenizer.noise_config.prob
-    # if anchor_noise is not None:
-    #    tokenizer.noise_config.set_prob(anchor_noise)
-
     # ---------------------------
     # 1) Build the Anchor Inputs
     # ---------------------------
@@ -107,10 +102,12 @@ def prepare_batch_stage2(
     anchor_seq_target_ids = anchor_seq_target_ids.to(device)
     anchor_seq_key_padding_mask = anchor_seq_key_padding_mask.to(device)
 
-    # # Pad word-level (though stage-2 might not use word recon, we match the shape anyway)
-    # anchor_word_target_ids, anchor_word_key_padding_mask = tokenizer.pad_targets(anchor_word_target_ids)
-    # anchor_word_target_ids = anchor_word_target_ids.to(device)
-    # anchor_word_key_padding_mask = anchor_word_key_padding_mask.to(device)
+    # Pad word-level (though stage-2 might not use word recon, we match the shape anyway)
+    anchor_word_target_ids, anchor_word_key_padding_mask = tokenizer.pad_targets(
+        anchor_word_target_ids
+    )
+    anchor_word_target_ids = anchor_word_target_ids.to(device)
+    anchor_word_key_padding_mask = anchor_word_key_padding_mask.to(device)
 
     anchor_inputs = (
         anchor_tokens_tensor,
@@ -119,38 +116,35 @@ def prepare_batch_stage2(
         anchor_sequence_ids,
         anchor_seq_target_ids,
         anchor_seq_key_padding_mask,
-        None,
-        None,
+        anchor_word_target_ids,
+        anchor_word_key_padding_mask,
     )
 
     # ----------------------------------
     # 2) Build the Positive (Clean) pass
     # ----------------------------------
-    # Force noise=0 for the clean pass
-    tokenizer.noise_config.set_prob(0.0)
-
     pos_token_ids, pos_attention_masks, pos_word_boundaries = [], [], []
     pos_sequence_ids, pos_seq_target_ids, pos_word_target_ids = [], [], []
 
     for j, text in enumerate(texts):
-        tokens, mask, boundaries, targets = tokenizer.tokenize(text)
+        tokens, mask, boundaries, targets = tokenizer.tokenize(text, noise_prob=-1)
 
         pos_token_ids.append(tokens)
         pos_attention_masks.append(mask)
         pos_word_boundaries.extend(boundaries)
 
-        pos_seq_target_ids.append([item for sublist in targets for item in sublist])
-        pos_word_target_ids.extend(targets)
+        # pos_seq_target_ids.append([item for sublist in targets for item in sublist])
+        # pos_word_target_ids.extend(targets)
         pos_sequence_ids.extend([j] * sum(len(x) for x in boundaries))
 
     pos_tokens_tensor = torch.cat(pos_token_ids).to(device)
     pos_attention_mask_tensor = torch.cat(pos_attention_masks).to(device)
 
-    pos_seq_target_ids, pos_seq_key_padding_mask = tokenizer.pad_targets(
-        pos_seq_target_ids
-    )
-    pos_seq_target_ids = pos_seq_target_ids.to(device)
-    pos_seq_key_padding_mask = pos_seq_key_padding_mask.to(device)
+    # pos_seq_target_ids, pos_seq_key_padding_mask = tokenizer.pad_targets(
+    #    pos_seq_target_ids
+    # )
+    # pos_seq_target_ids = pos_seq_target_ids.to(device)
+    # pos_seq_key_padding_mask = pos_seq_key_padding_mask.to(device)
 
     # pos_word_target_ids, pos_word_key_padding_mask = tokenizer.pad_targets(pos_word_target_ids)
     # pos_word_target_ids = pos_word_target_ids.to(device)
@@ -166,8 +160,5 @@ def prepare_batch_stage2(
         None,
         None,
     )
-
-    # Restore noise prob
-    # tokenizer.noise_config.set_prob(old_prob)
 
     return anchor_inputs, pos_inputs

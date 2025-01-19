@@ -132,7 +132,7 @@ def train_step_stage2(
     contrastive_loss_fn: nn.Module,
     pid: PID,
     prob: float,
-    seq_weight: float = 1.0,
+    contrast_weight: float = 1.0,
 ) -> Tuple[float, float, float, float, float]:
     """
     Stage 2: Sequence reconstruction + contrastive loss.
@@ -221,10 +221,15 @@ def train_step_stage2(
     contrast_loss = contrastive_loss_fn(anchor_embeddings, pos_embeddings)
 
     # Combine
-    total_loss = seq_weight * seq_loss + contrast_loss
+    total_loss = seq_loss + contrast_weight * contrast_loss
 
     # Backprop
     scaler.scale(total_loss).backward()
+
+    # Gradient clipping
+    scaler.unscale_(optimizer)  # Unscale gradients for clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
     scaler.step(optimizer)
     scaler.update()
     scheduler.step()
@@ -272,13 +277,15 @@ def train(
 
     # Losses
     weight = load_token_weights("token_weights.json", device)
-    recon_loss_seq = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
     recon_loss_word = None
     if stage == 1:
+        recon_loss_seq = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
         recon_loss_word = FocalLoss(gamma=1.0)
 
     contrastive_loss_fn = None
     if stage == 2:
+        recon_loss_seq = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+        # recon_loss_seq = FocalLoss(gamma=1.0)
         contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
 
     # PID

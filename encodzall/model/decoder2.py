@@ -18,7 +18,7 @@ class TransformerDecoderLayer(nn.Module):
     A single Transformer decoder layer with:
       (1) Self-attention sublayer (causal),
       (2) Cross-attention sublayer,
-      (3) Feed-forward sublayer (baked into cross-attention for simplicity).
+      (3) Feed-forward sublayer
     """
 
     def __init__(
@@ -44,6 +44,18 @@ class TransformerDecoderLayer(nn.Module):
             attn_dropout (float): Dropout inside attention. Defaults to 0.0.
             is_causal (bool): Whether self-attn is causal. Defaults to True (decoder).
         """
+        mlp_sa = FeedForward(
+            gate_proj=nn.Linear(d_model, dim_feedforward, bias=False),
+            down_proj=nn.Linear(dim_feedforward, d_model, bias=False),
+            up_proj=None,
+        )
+
+        # MLP for the cross-attention block
+        mlp_ca = FeedForward(
+            gate_proj=nn.Linear(d_model, dim_feedforward, bias=False),
+            down_proj=nn.Linear(dim_feedforward, d_model, bias=False),
+            up_proj=None,
+        )
 
         # -- 1) Self-attention sublayer (no feed-forward) --
         # Create a MultiHeadAttention for decoder self-attention
@@ -57,21 +69,26 @@ class TransformerDecoderLayer(nn.Module):
             k_proj=nn.Linear(d_model, num_kv_heads * head_dim, bias=False),
             v_proj=nn.Linear(d_model, num_kv_heads * head_dim, bias=False),
             output_proj=nn.Linear(nhead * head_dim, d_model, bias=False),
-            pos_embeddings=RotaryPositionalEmbeddings(dim=head_dim, max_seq_len=max_seq_len),
+            pos_embeddings=RotaryPositionalEmbeddings(
+                dim=head_dim, max_seq_len=max_seq_len
+            ),
             attn_dropout=attn_dropout,
             max_seq_len=max_seq_len,
             is_causal=is_causal,  # causal self-attention
         )
+        for proj in [
+            self_attn.q_proj,
+            self_attn.k_proj,
+            self_attn.v_proj,
+            self_attn.output_proj,
+        ]:
+            nn.init.xavier_uniform_(proj.weight)
 
-        # RMSNorm for the sublayer
-        self.sa_norm = RMSNorm(d_model, eps=1e-6)
-        # We do not want an MLP here, so pass mlp=None
-        # We also skip mlp_norm and scaling
         self.self_attn_layer = TransformerSelfAttentionLayer(
             attn=self_attn,
-            mlp=nn.Identity(),
-            sa_norm=self.sa_norm,   # pre-attn norm
-            mlp_norm=None,          # no feed-forward here
+            mlp=mlp_sa,
+            sa_norm=RMSNorm(d_model, eps=1e-6),
+            mlp_norm=RMSNorm(d_model, eps=1e-6),
             sa_scale=None,
             mlp_scale=None,
         )
@@ -88,30 +105,24 @@ class TransformerDecoderLayer(nn.Module):
             k_proj=nn.Linear(d_model, num_kv_heads * head_dim, bias=False),
             v_proj=nn.Linear(d_model, num_kv_heads * head_dim, bias=False),
             output_proj=nn.Linear(nhead * head_dim, d_model, bias=False),
-            pos_embeddings=None,    # Must be None for cross-attention
+            pos_embeddings=None,  # Must be None for cross-attention
             attn_dropout=attn_dropout,
             max_seq_len=max_seq_len,  # Not used here, no pos_embeddings
-            is_causal=False,          # cross-attn is not typically causal
+            is_causal=False,  # cross-attn is not typically causal
         )
-
-        # MLP for the cross-attention block
-        mlp = FeedForward(
-            gate_proj=nn.Linear(d_model, dim_feedforward, bias=False),
-            down_proj=nn.Linear(dim_feedforward, d_model, bias=False),
-            # up_proj=None means "just gate_proj * activation -> down_proj"
-            up_proj=None,
-            # Optional: activation=nn.SiLU()
-        )
-
-        # Norm layers for cross-attn
-        self.ca_norm = RMSNorm(d_model, eps=1e-6)
-        self.mlp_norm = RMSNorm(d_model, eps=1e-6)
+        for proj in [
+            cross_attn.q_proj,
+            cross_attn.k_proj,
+            cross_attn.v_proj,
+            cross_attn.output_proj,
+        ]:
+            nn.init.xavier_uniform_(proj.weight)
 
         self.cross_attn_layer = TransformerCrossAttentionLayer(
             attn=cross_attn,
-            mlp=mlp,
-            ca_norm=self.ca_norm,
-            mlp_norm=self.mlp_norm,
+            mlp=mlp_ca,
+            ca_norm=RMSNorm(d_model, eps=1e-6),
+            mlp_norm=RMSNorm(d_model, eps=1e-6),
             ca_scale=None,
             mlp_scale=None,
         )
@@ -136,9 +147,7 @@ class TransformerDecoderLayer(nn.Module):
             torch.Tensor: shape [batch_size, tgt_seq_len, d_model].
         """
         # -- Self-Attention sublayer --
-        tgt = self.self_attn_layer(
-            tgt, mask=tgt_mask, input_pos=tgt_pos
-        )
+        tgt = self.self_attn_layer(tgt)  # , mask=tgt_mask, input_pos=tgt_pos
 
         # -- Cross-Attention + FeedForward sublayer --
         tgt = self.cross_attn_layer(
@@ -189,6 +198,7 @@ class TransformerDecoder(nn.Module):
 
         # Optional normalization on the raw decoder input
         self.input_norm = RMSNorm(d_model, eps=1e-6)
+        self.output_norm = RMSNorm(d_model, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
 
         # Build N decoder layers
@@ -240,4 +250,4 @@ class TransformerDecoder(nn.Module):
                 tgt_pos=tgt_pos,
             )
 
-        return tgt
+        return self.output_norm(tgt)

@@ -84,7 +84,8 @@ class ByteLevelTokenizer:
         # noise.keyboard - nearby keystrokes
         # noise.mask - masking with distinct masks consonants, non-whitespace (punc), vowels and either (general)
         # noise.mask - 0x06-0x0B
-        #noise_func = random.choice([noise.ocr, noise.keyboard, noise.mask])
+        #noise_func = random.choice([noise.ocr, noise.moe, noise.keyboard])
+        #noise_func = random.choice([noise.mask, noise.moe, noise.ocr, noise.keyboard])
         noise_func = noise.mask
         return [noise_func(word, probability=noise_prob) for word in words]
 
@@ -336,7 +337,9 @@ class ByteLevelTokenizer:
             words = words[:truncate_len]
 
         # 4) Optionally apply noise
-        if noise_prob or self.noise_config.noise_prob > 0:
+        if noise_prob == -1: # override noise setting
+            noised_words = words.copy()
+        elif noise_prob or self.noise_config.noise_prob > 0:
             noise_prob = noise_prob or self.noise_config.noise_prob
             assert 0 <= noise_prob <= 1
             noised_words = self.apply_noise_to_words(words, noise_prob=noise_prob)

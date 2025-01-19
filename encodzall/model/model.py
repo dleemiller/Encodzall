@@ -28,7 +28,7 @@ class Encodzall(nn.Module):
             num_layers=config.num_encoder1_layers,
             d_model=self.d_model,
             nhead=config.nhead,
-            num_kv_heads=config.num_kv_heads_encoder1 or config.nhead // 2,
+            num_kv_heads=config.num_kv_heads_encoder1 or config.nhead // 4,
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
@@ -78,6 +78,9 @@ class Encodzall(nn.Module):
             max_seq_len=64,
             is_causal=True,
         )
+
+        # Positional encodings for memory and target sequences
+        self.positional_encoding = SinusoidalPositionalEncoding(self.d_model)
 
         # Pooling, unpadding, output
         self.word_pooling = WordPooling(pooling_type=config.pooling_type)
@@ -253,12 +256,6 @@ class Encodzall(nn.Module):
         if seq_target_ids is not None:
             # Embed target tokens
             seq_tgt_emb = self.embedding(seq_target_ids.long())
-            # Generate causal mask => shape (tgt_len, tgt_len)
-            seq_causal_mask = (
-                nn.Transformer.generate_square_subsequent_mask(seq_target_ids.size(1))
-                .bool()
-                .to(device)
-            )
 
             # Memory mask => shape (b, tgt_len, mem_len)
             if seq_key_padding_mask is not None:
@@ -269,16 +266,16 @@ class Encodzall(nn.Module):
                 # If no pad mask for the target side, pass something that allows all tokens
                 seq_mem_mask = None
 
+            # Add positional encodings to memory
+            memory_positions = self.positional_encoding(
+                seq_length=memory.size(1), device=device
+            )
+
             # TransformerDecoder expects True => attend or False => block.
             # By default, PyTorch’s 'mask' means True=ignore, so we often invert.
-            # Depending on your usage, you may need to invert seq_causal_mask or not.
-            # In your code, you used ~seq_causal_mask.unsqueeze(0).  Just be consistent:
             seq_decoder_out = self.decoder(
                 tgt=seq_tgt_emb,
-                memory=memory,
-                tgt_mask=~seq_causal_mask.unsqueeze(
-                    0
-                ),  # or however you were applying it
+                memory=memory + memory_positions.unsqueeze(0),
                 memory_mask=seq_mem_mask,
             )
             seq_logits = self.output_layer(seq_decoder_out)
@@ -291,11 +288,6 @@ class Encodzall(nn.Module):
         word_logits = None
         if word_target_ids is not None:
             word_tgt_emb = self.embedding(word_target_ids.long())
-            word_causal_mask = (
-                nn.Transformer.generate_square_subsequent_mask(word_target_ids.size(1))
-                .bool()
-                .to(device)
-            )
 
             # Flatten memory => shape (N, 1, d_model)
             # (where N is total # words after removing pad)
@@ -304,25 +296,20 @@ class Encodzall(nn.Module):
             eos_mask = self.get_eos_mask(sequence_ids)
             word_memory = word_memory[eos_mask]
 
-            # Construct memory mask if needed
-            # For a single “word sequence” shape mismatch,
-            # you might need a custom approach.
-            # Below is how you had it, but be sure the shapes align:
-            if word_key_padding_mask is not None:
-                word_mem_mask = self.create_memory_mask(
-                    torch.zeros_like(
-                        word_memory[..., 0], dtype=torch.bool, device=device
-                    ),
-                    word_key_padding_mask.bool(),
-                )
-            else:
-                word_mem_mask = None
+            # if word_key_padding_mask is not None:
+            #    word_mem_mask = self.create_memory_mask(
+            #        torch.zeros_like(
+            #            word_memory[..., 0], dtype=torch.bool, device=device
+            #        ),
+            #        word_key_padding_mask.bool(),
+            #    )
+            # else:
+            #    word_mem_mask = None
 
             word_decoder_out = self.decoder(
                 tgt=word_tgt_emb,
                 memory=word_memory,
-                tgt_mask=~word_causal_mask.unsqueeze(0),
-                memory_mask=word_mem_mask,
+                # memory_mask=word_mem_mask,
             )
             word_logits = self.output_layer(word_decoder_out)
             word_logits = word_logits[:, :-1, :].contiguous()
