@@ -1,11 +1,12 @@
-# model.py
-from contextlib import contextmanager
 import torch
 import torch.nn as nn
 from typing import List, Tuple, Optional, Union
 
+from contextlib import contextmanager
+
 from ..config import TransformerConfig
-from .encoder import TransformerEncoder
+from .encoder2 import TransformerEncoder
+from .decoder2 import TransformerDecoder
 from .positional_encoding import SinusoidalPositionalEncoding
 from .word_pooling import WordPooling
 from .unpad_sequences import UnpadSequences
@@ -13,13 +14,7 @@ from .unpad_sequences import UnpadSequences
 
 class Encodzall(nn.Module):
     def __init__(self, config: TransformerConfig):
-        """
-        Initializes the Encodzall model.
-
-        Args:
-            config (TransformerConfig): Configuration parameters for the model.
-        """
-        super(Encodzall, self).__init__()
+        super().__init__()
         self.config = config
         self.d_model = config.d_model
 
@@ -28,19 +23,21 @@ class Encodzall(nn.Module):
             num_embeddings=config.vocab_size, embedding_dim=self.d_model
         )
 
-        # Encoder layers
+        # Encoder 1
         self.encoder1 = TransformerEncoder(
             num_layers=config.num_encoder1_layers,
             d_model=self.d_model,
             nhead=config.nhead,
-            num_kv_heads=config.num_kv_heads_encoder1 or config.nhead // 2,
+            num_kv_heads=config.num_kv_heads_encoder1 or config.nhead // 4,
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            attn_dropout=config.dropout,  # Adjust as needed
+            attn_dropout=config.attn_dropout,
             max_seq_len=config.max_seq_length_encoder1,
             is_causal=False,
         )
+
+        # Encoder 2
         self.encoder2 = TransformerEncoder(
             num_layers=config.num_encoder2_layers,
             d_model=self.d_model,
@@ -49,54 +46,51 @@ class Encodzall(nn.Module):
             head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            attn_dropout=config.dropout,  # Adjust as needed
+            attn_dropout=config.attn_dropout,
             max_seq_len=config.max_seq_length_encoder2,
             is_causal=False,
         )
 
-        # Decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=config.d_model,
+        # Decoder for sequence-level reconstruction
+        self.decoder = TransformerDecoder(
+            num_layers=config.num_decoder_layers,
+            d_model=self.d_model,
             nhead=config.nhead,
+            num_kv_heads=config.num_kv_heads_decoder or config.nhead // 2,
+            head_dim=self.d_model // config.nhead,
             dim_feedforward=config.dim_feedforward,
             dropout=config.dropout,
-            activation=config.activation,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=config.num_decoder_layers
+            attn_dropout=config.attn_dropout,
+            max_seq_len=config.max_seq_length_decoder,
+            is_causal=True,
         )
 
-        # Word Decoder
-        word_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=config.d_model,
+        # Decoder for word-level reconstruction
+        self.word_decoder = TransformerDecoder(
+            num_layers=1,
+            d_model=self.d_model,
             nhead=1,
+            num_kv_heads=1,
+            head_dim=self.d_model,
             dim_feedforward=config.dim_feedforward,
-            dropout=0.05,
-            activation=config.activation,
-            batch_first=True,
-            norm_first=True,
+            dropout=0.0,
+            attn_dropout=0.1,
+            max_seq_len=64,
+            is_causal=True,
         )
-        self.word_decoder = nn.TransformerDecoder(word_decoder_layer, num_layers=1)
 
         # Positional encodings for memory and target sequences
         self.positional_encoding = SinusoidalPositionalEncoding(self.d_model)
 
-        # Word pooling and unpadding
+        # Pooling, unpadding, output
         self.word_pooling = WordPooling(pooling_type=config.pooling_type)
         self.unpad_sequences = UnpadSequences()
-
-        # Output layer
         self.output_layer = nn.Linear(self.d_model, config.vocab_size)
 
     @contextmanager
     def set_dropout(self, dropout: float):
         """
-        Temporarily updates the dropout rate for all layers during a forward pass.
-
-        Args:
-            dropout (float): The dropout rate to use temporarily.
+        Temporarily override dropout rate in all nn.Dropout modules.
         """
         original_dropout_rates = {}
         for module in self.modules():
@@ -112,243 +106,212 @@ class Encodzall(nn.Module):
     @staticmethod
     def key_padding_to_attention_mask(key_padding_mask: torch.Tensor) -> torch.Tensor:
         """
-        Converts a key padding mask into an attention mask.
-
-        Args:
-            key_padding_mask (torch.Tensor): Tensor of shape (batch_size, seq_length)
-                                             where True indicates padding tokens.
-
-        Returns:
-            torch.Tensor: Attention mask of shape (batch_size, seq_length, seq_length)
-                          with 1 for allowed attention and 0 for blocked attention.
+        Converts a key_padding_mask (True=pad) into a 2D attention mask (b, s, s).
         """
-        # Invert the mask: True -> 0, False -> 1
-        inverted_mask = ~key_padding_mask  # Shape: (batch_size, seq_length)
-
-        # Expand and multiply to create pairwise mask
+        inverted_mask = ~key_padding_mask  # True => valid
         attention_mask = inverted_mask.unsqueeze(1) & inverted_mask.unsqueeze(2)
         return attention_mask.bool()
 
     @staticmethod
+    def create_memory_mask(
+        memory_key_padding_mask: torch.Tensor,
+        target_key_padding_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Create memory mask for the decoder:
+            shape => (batch_size, tgt_len, mem_len)
+            True in final mask means "allow attend".
+        """
+        memory_key_padding_mask = memory_key_padding_mask.bool()  # b x mem_len
+        target_key_padding_mask = target_key_padding_mask.bool()  # b x tgt_len
+        # expand memory_key_padding_mask to match target seq length
+        memory_mask = memory_key_padding_mask.unsqueeze(1).expand(
+            -1, target_key_padding_mask.size(1), -1
+        )
+        # PyTorch expects True => attend, so invert if needed
+        return ~memory_mask
+
+    @staticmethod
     def flatten_and_filter(tensor, key_padding_mask):
         """
-        Flattens the first two dimensions of the tensor and filters out padding tokens.
-
-        Args:
-            tensor (torch.Tensor): Input tensor of shape (b, s, d_model).
-            key_padding_mask (torch.Tensor): Mask tensor of shape (b, s), where
-                                             True indicates padding and False indicates valid tokens.
-
-        Returns:
-            torch.Tensor: Filtered tensor of shape (N, d_model), where N is the number of valid tokens.
+        Flatten (b, s, d) -> (b*s, d) and remove pad rows based on mask.
         """
-        # Ensure the mask is of boolean type
         if key_padding_mask.dtype != torch.bool:
             key_padding_mask = key_padding_mask.bool()
-
-        # Invert the mask to get valid tokens (False -> True, True -> False)
-        valid_mask = ~key_padding_mask  # Shape: (b, s)
-
-        # Flatten the tensor and mask
+        valid_mask = ~key_padding_mask  # True => valid
         b, s, d_model = tensor.shape
-        flattened_tensor = tensor.view(-1, d_model)  # Shape: (b*s, d_model)
-        flattened_mask = valid_mask.view(-1)  # Shape: (b*s)
+        flat_t = tensor.view(-1, d_model)  # (b*s, d_model)
+        flat_m = valid_mask.view(-1)  # (b*s)
+        filtered = flat_t[flat_m]  # (N, d_model)
+        return filtered.unsqueeze(dim=1)  # (N, 1, d_model)
 
-        # Select only the valid vectors
-        filtered_tensor = flattened_tensor[flattened_mask]  # Shape: (N, d_model)
-
-        return filtered_tensor.unsqueeze(dim=1)
+    @staticmethod
+    def get_eos_mask(sequence_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Identify final token in each sub-sequence after unpadding,
+        to remove them from the 'word memory'.
+        """
+        # sequence_ids is shape [#words], we want to mark last token in each sequence group
+        # This code is a bit unusual, but you can adapt as needed.
+        mask = sequence_ids[:-1] != sequence_ids[1:]
+        mask = torch.cat([mask, torch.tensor([True], device=sequence_ids.device)])
+        # `mask` is True at boundaries => so `~mask` is everything except boundary
+        return ~mask
 
     def average_pool_memory(
         self, memory: torch.Tensor, memory_key_padding_mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Performs average pooling on the memory vectors, respecting the padding mask.
-
-        Args:
-            memory (torch.Tensor): Memory tensor from the second encoder of shape (batch_size, seq_length, d_model).
-            memory_key_padding_mask (torch.Tensor): Padding mask for the memory of shape (batch_size, seq_length),
-                                                    where True indicates padding tokens.
-
-        Returns:
-            torch.Tensor: Average pooled embeddings of shape (batch_size, d_model).
+        Average pool memory vectors across the unpadded dimension => (batch_size, d_model)
         """
-        # Invert mask: True for valid tokens, False for padding
-        valid_mask = ~memory_key_padding_mask  # Shape: (batch_size, seq_length)
-
-        # Expand mask for multiplication
-        valid_mask_expanded = valid_mask.unsqueeze(
-            -1
-        ).float()  # Shape: (batch_size, seq_length, 1)
-
-        # Zero out the padded tokens
-        memory_masked = (
-            memory * valid_mask_expanded
-        )  # Shape: (batch_size, seq_length, d_model)
-
-        # Sum the memory vectors
-        sum_memory = memory_masked.sum(dim=1)  # Shape: (batch_size, d_model)
-
-        # Count the number of valid (non-padded) tokens
-        counts = valid_mask_expanded.sum(dim=1)  # Shape: (batch_size, 1)
-
-        # Avoid division by zero
-        counts = counts.clamp(min=1e-9)
-
-        # Compute the average pooled embeddings
-        embeddings = sum_memory / counts  # Shape: (batch_size, d_model)
-
+        valid_mask = ~memory_key_padding_mask
+        valid_mask_expanded = valid_mask.unsqueeze(-1).float()
+        memory_masked = memory * valid_mask_expanded
+        sum_memory = memory_masked.sum(dim=1)
+        counts = valid_mask_expanded.sum(dim=1).clamp(min=1e-9)
+        embeddings = sum_memory / counts
         return embeddings
-
-    @staticmethod
-    def get_eos_mask(sequence_ids):
-        """
-        Generates a mask and indices indicating the last occurrence of each sequence ID.
-
-        Args:
-            sequence_ids (list or tuple): List of sequence IDs.
-
-        Returns:
-            tuple: (mask tensor, indices tensor)
-        """
-        mask = sequence_ids[:-1] != sequence_ids[1:]
-        mask = torch.cat([mask, torch.tensor([True]).to(sequence_ids.device)])
-        return ~mask
 
     def forward(
         self,
         x: torch.Tensor,
         sequence_ids: torch.Tensor,
-        seq_target_ids: torch.Tensor,
-        seq_key_padding_mask: torch.Tensor,
-        word_target_ids: torch.Tensor,
-        word_key_padding_mask: torch.Tensor,
-        attention_mask: torch.Tensor,
-        word_boundaries: List[List[Tuple[int, int]]],
-        return_embeddings_only: bool = False,  # Added flag
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        seq_target_ids: Optional[torch.Tensor] = None,
+        seq_key_padding_mask: Optional[torch.Tensor] = None,
+        word_target_ids: Optional[torch.Tensor] = None,
+        word_key_padding_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        word_boundaries: Optional[List[List[Tuple[int, int]]]] = None,
+        return_embeddings_only: bool = False,
+    ) -> Union[
+        torch.Tensor,
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """
-        Forward pass of the Encodzall model.
+        Forward pass.
+
+        In Stage 2’s “second pass” for contrastive positives,
+        call with `return_embeddings_only=True` and no target IDs.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_length) with token indices.
-            sequence_ids (torch.Tensor): Sequence IDs for unpadding.
-            target_ids (torch.Tensor): Target tensor of shape (batch_size, target_seq_length) with token indices.
-            target_key_padding_mask (torch.Tensor): Padding mask for the target.
-            attention_mask (torch.Tensor, optional): Attention mask for the encoder of shape (batch_size, seq_length, seq_length).
-            word_boundaries (List[List[Tuple[int, int]]], optional): Word boundaries for word pooling.
-            return_embeddings_only (bool, optional): If set to True, returns only the pooled embeddings. Defaults to False.
+            x: Input token IDs => (batch_size, seq_length)
+            sequence_ids: Sub-sequence IDs for unpadding => (batch_size,) or a shape that your unpad logic expects
+            seq_target_ids: Optional, used for sequence reconstruction => (batch_size, seq_tgt_len)
+            seq_key_padding_mask: Optional, True=pad => (batch_size, seq_tgt_len)
+            word_target_ids: Optional, used for word-level reconstruction => (batch_size, word_tgt_len)
+            word_key_padding_mask: Optional => (batch_size, word_tgt_len)
+            attention_mask: (batch_size, seq_len, seq_len) for first encoder
+            word_boundaries: data for block-wise attention & pooling
+            return_embeddings_only: if True, skip decoders and just return [batch_size, d_model] embeddings
 
         Returns:
-            torch.Tensor or Tuple[torch.Tensor, torch.Tensor]:
-                - If `return_embeddings_only` is True, returns the pooled embeddings tensor of shape (batch_size, d_model).
-                - Otherwise, returns a tuple containing:
-                    1. Pooled embeddings tensor of shape (batch_size, d_model).
-                    2. Logits tensor of shape (batch_size, target_seq_length - 1, vocab_size).
+            If return_embeddings_only == True:
+                embeddings => (batch_size, d_model)
+            Else:
+                (embeddings, seq_logits, word_logits)
         """
-        batch_size, seq_length = x.size()
         device = x.device
 
-        # Embed input tokens
-        embedded = self.embedding(x.long())  # Shape: (batch_size, seq_length, d_model)
+        # 1) Embedding
+        embedded = self.embedding(x.long())  # (b, s, d_model)
 
-        # Pass through the first encoder
-        encoder1_output = self.encoder1(embedded, attn_mask=attention_mask.bool())
+        # 2) First Encoder
+        #    e.g. block-diagonal attn for each "word"
+        #    attention_mask => (b, s, s)
+        enc1_out = self.encoder1(embedded, attn_mask=attention_mask.bool())
 
-        # Perform word pooling
-        pooled_word_vectors = self.word_pooling(
-            encoder1_output, word_boundaries
-        )  # Shape: (total_words, d_model)
+        # 3) Word-level pooling
+        #    => shape (num_words_total, d_model)
+        if word_boundaries is None:
+            raise ValueError(
+                "word_boundaries must be provided unless you change the pooling logic."
+            )
+        pooled_word_vectors = self.word_pooling(enc1_out, word_boundaries)
 
-        # Unpad sequences to form memory
-        encoder1_output, memory_key_padding_mask = self.unpad_sequences(
+        # 4) Unpad sequences => pass (pooled_word_vectors, sequence_ids)
+        enc1_unpadded, memory_key_padding_mask = self.unpad_sequences(
             pooled_word_vectors, sequence_ids
         )
-        memory_attn_mask = self.key_padding_to_attention_mask(memory_key_padding_mask)
+        # => enc1_unpadded shape: (batch_size, *some_length*, d_model)
 
-        # Pass through the second encoder
-        memory = self.encoder2(encoder1_output, attn_mask=memory_attn_mask.bool())
-        # Note: Positional encoding will be added after average pooling
+        # 5) Second Encoder
+        mem_attn_mask = self.key_padding_to_attention_mask(memory_key_padding_mask)
+        memory = self.encoder2(enc1_unpadded, attn_mask=mem_attn_mask.bool())
 
-        # ------------------------- Average Pooling Step Moved to Separate Function -------------------------
-        # Average pool the memory vectors, respecting the memory_key_padding_mask
-        embeddings = self.average_pool_memory(
-            memory, memory_key_padding_mask
-        )  # Shape: (batch_size, d_model)
-        # -----------------------------------------------------------------------------------------------
+        # 6) Average pooling => final "embedding" for each sequence in the batch
+        embeddings = self.average_pool_memory(memory, memory_key_padding_mask)
+        # => shape (batch_size, d_model)
 
-        # Check if only embeddings should be returned
+        # -----------------------------------------------------------------
+        # If we only want embeddings (Stage 2 “clean” pass => contrastive positives),
+        # skip decoders altogether.
+        # -----------------------------------------------------------------
         if return_embeddings_only:
-            return embeddings  # Early exit with embeddings
+            return embeddings  # shape [b, d_model]
 
-        # Add positional encodings to memory
-        memory_positions = self.positional_encoding(
-            seq_length=memory.size(1), device=device
-        )
+        # ==================
+        # Sequence Decoder
+        # ==================
+        seq_logits = None
+        if seq_target_ids is not None:
+            # Embed target tokens
+            seq_tgt_emb = self.embedding(seq_target_ids.long())
 
-        # Embed target tokens
-        seq_target_embedded = self.embedding(
-            seq_target_ids.long()
-        )  # Shape: (batch_size, target_seq_length, d_model)
-        seq_target_positions = self.positional_encoding(
-            seq_length=seq_target_ids.size(1), device=device
-        )
+            # Memory mask => shape (b, tgt_len, mem_len)
+            if seq_key_padding_mask is not None:
+                seq_mem_mask = self.create_memory_mask(
+                    memory_key_padding_mask.bool(), seq_key_padding_mask.bool()
+                )
+            else:
+                # If no pad mask for the target side, pass something that allows all tokens
+                seq_mem_mask = None
 
-        # Generate causal mask for decoder
-        seq_causal_mask = nn.Transformer.generate_square_subsequent_mask(
-            seq_target_ids.size(1)
-        ).to(device)
+            # Add positional encodings to memory
+            memory_positions = self.positional_encoding(
+                seq_length=memory.size(1), device=device
+            )
 
-        # Pass through the decoder
-        seq_decoder_output = self.decoder(
-            tgt=seq_target_embedded + seq_target_positions,
-            memory=memory + memory_positions,
-            tgt_mask=seq_causal_mask.bool(),
-            memory_key_padding_mask=memory_key_padding_mask.bool(),
-            tgt_key_padding_mask=seq_key_padding_mask.bool(),
-        )
+            # TransformerDecoder expects True => attend or False => block.
+            # By default, PyTorch’s 'mask' means True=ignore, so we often invert.
+            seq_decoder_out = self.decoder(
+                tgt=seq_tgt_emb,
+                memory=memory + memory_positions.unsqueeze(0),
+                memory_mask=seq_mem_mask,
+            )
+            seq_logits = self.output_layer(seq_decoder_out)
+            # Exclude last token for teacher-forcing next-token prediction
+            seq_logits = seq_logits[:, :-1, :].contiguous()
 
-        # Embed target tokens
-        word_target_embedded = self.embedding(
-            word_target_ids.long()
-        )  # Shape: (batch_size, target_seq_length, d_model)
-        word_target_positions = self.positional_encoding(
-            seq_length=word_target_ids.size(1), device=device
-        )
+        # ==================
+        # Word Decoder
+        # ==================
+        word_logits = None
+        if word_target_ids is not None:
+            word_tgt_emb = self.embedding(word_target_ids.long())
 
-        # Generate causal mask for decoder
-        word_causal_mask = nn.Transformer.generate_square_subsequent_mask(
-            word_target_ids.size(1)
-        ).to(device)
+            # Flatten memory => shape (N, 1, d_model)
+            # (where N is total # words after removing pad)
+            word_memory = self.flatten_and_filter(memory, memory_key_padding_mask)
+            # Also remove sequence-level EOS tokens
+            eos_mask = self.get_eos_mask(sequence_ids)
+            word_memory = word_memory[eos_mask]
 
-        word_memory = self.flatten_and_filter(memory, memory_key_padding_mask)
+            # if word_key_padding_mask is not None:
+            #    word_mem_mask = self.create_memory_mask(
+            #        torch.zeros_like(
+            #            word_memory[..., 0], dtype=torch.bool, device=device
+            #        ),
+            #        word_key_padding_mask.bool(),
+            #    )
+            # else:
+            #    word_mem_mask = None
 
-        # remove sequence EOS tokens
-        eos_mask = self.get_eos_mask(sequence_ids)
-        word_memory = word_memory[eos_mask]
+            word_decoder_out = self.decoder(
+                tgt=word_tgt_emb,
+                memory=word_memory,
+                # memory_mask=word_mem_mask,
+            )
+            word_logits = self.output_layer(word_decoder_out)
+            word_logits = word_logits[:, :-1, :].contiguous()
 
-        # Pass through the decoder
-        # print(
-        #     word_target_embedded.shape,
-        #     word_target_positions.shape,
-        #     word_memory.shape,
-        #     word_key_padding_mask.shape,
-        # )
-        word_decoder_output = self.decoder(
-            tgt=word_target_embedded + word_target_positions,
-            memory=word_memory,
-            tgt_mask=word_causal_mask.bool(),
-            memory_key_padding_mask=None,
-            tgt_key_padding_mask=word_key_padding_mask.bool(),
-        )
-
-        # Compute logits
-        seq_logits = self.output_layer(seq_decoder_output)
-        word_logits = self.output_layer(word_decoder_output)
-
-        # Exclude last token for prediction
-        seq_logits = seq_logits[:, :-1, :].contiguous()
-        word_logits = word_logits[:, :-1, :].contiguous()
-
-        # Return both embeddings and logits
-        return embeddings, seq_logits, word_logits
+        return (embeddings, seq_logits, word_logits)

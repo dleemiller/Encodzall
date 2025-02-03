@@ -15,6 +15,7 @@ class TransformerConfig:
     activation: str
     dim_feedforward: int
     dropout: float
+    attn_dropout: float
     max_seq_length_encoder1: int
     max_seq_length_encoder2: int
     max_seq_length_decoder: int
@@ -23,6 +24,7 @@ class TransformerConfig:
     # Optional Parameters (Default to None)
     num_kv_heads_encoder1: Optional[int] = None
     num_kv_heads_encoder2: Optional[int] = None
+    num_kv_heads_decoder: Optional[int] = None
 
 
 # Configurations
@@ -31,13 +33,14 @@ class TransformerConfig:
 encodzall_xs = TransformerConfig(
     vocab_size=256,
     d_model=256,
-    nhead=8,
+    nhead=4,
     num_encoder1_layers=2,
-    num_encoder2_layers=1,
-    num_decoder_layers=2,
+    num_encoder2_layers=2,
+    num_decoder_layers=1,
     activation="gelu",
-    dim_feedforward=1024,
+    dim_feedforward=1536,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,
     max_seq_length_decoder=4096,
@@ -55,6 +58,7 @@ encodzall_s = TransformerConfig(
     activation="gelu",
     dim_feedforward=1536,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=1024,
     max_seq_length_decoder=4096,
@@ -72,6 +76,7 @@ encodzall_l = TransformerConfig(
     activation="gelu",
     dim_feedforward=4096,
     dropout=0.0,
+    attn_dropout=0.05,
     max_seq_length_encoder1=64,
     max_seq_length_encoder2=2048,
     max_seq_length_decoder=4096,

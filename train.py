@@ -19,7 +19,7 @@ from simple_pid import PID
 from encodzall.config.training_config import TrainingConfig
 from encodzall.config.noise_config import NoiseConfig
 from encodzall import encodzall_xs, encodzall_s, Encodzall, ByteLevelTokenizer, PAD_BYTE
-from encodzall.losses import MultipleNegativesRankingLoss
+from encodzall.losses import MultipleNegativesRankingLoss, FocalLoss
 
 
 def set_seed(seed: int):
@@ -69,9 +69,7 @@ def prepare_batch(batch, tokenizer, config, device, noise_prob: Optional[float] 
     )
 
     for j, text in enumerate(texts):
-        tokens, mask, boundaries, targets = tokenizer.tokenize(
-            text, noise_prob=noise_prob
-        )
+        tokens, mask, boundaries, targets = tokenizer.tokenize(text)
         token_ids.append(tokens)
         attention_masks.append(mask)
         word_boundaries.extend(boundaries)
@@ -200,7 +198,8 @@ def train_step(
     optimizer: optim.Optimizer,
     scaler: GradScaler,
     scheduler: Any,
-    reconstruction_loss_fn: nn.Module,
+    recon_loss_seq: nn.Module,
+    recon_loss_word: nn.Module,
     contrastive_loss_fn: Optional[nn.Module],
     pid: PID,
     prob: float,
@@ -219,7 +218,7 @@ def train_step(
         optimizer (optim.Optimizer): Optimizer.
         scaler (GradScaler): Gradient scaler for AMP.
         scheduler (Any): Learning rate scheduler.
-        reconstruction_loss_fn (nn.Module): Loss function for reconstruction.
+        recon_loss_seq (nn.Module): Loss function for reconstruction.
         contrastive_loss_fn (Optional[nn.Module]): Loss function for contrastive learning.
         pid (PID): PID controller for noise probability.
         prob (float): Current noise probability.
@@ -239,7 +238,6 @@ def train_step(
         word_key_padding_mask,
     ) = batch_inputs
 
-
     optimizer.zero_grad()
     with autocast("cuda"):
         sequence_ids_tensor = torch.tensor(
@@ -254,19 +252,18 @@ def train_step(
             word_key_padding_mask=word_key_padding_mask,
             attention_mask=attention_mask_tensor,
             word_boundaries=word_boundaries,
-
         )
         # Assuming model returns (something, seq_logits, word_logits)
         _, seq_logits, word_logits = outputs
 
         # Compute reconstruction loss
-        seq_reconstruction_loss = reconstruction_loss_fn(
+        seq_reconstruction_loss = recon_loss_seq(
             seq_logits.view(-1, seq_logits.size(-1)),
-            seq_target_ids[:, 1:].contiguous().view(-1),
+            seq_target_ids[:, 1:].long().contiguous().view(-1),
         )
-        word_reconstruction_loss = reconstruction_loss_fn(
+        word_reconstruction_loss = recon_loss_word(
             word_logits.view(-1, word_logits.size(-1)),
-            word_target_ids[:, 1:].contiguous().view(-1),
+            word_target_ids[:, 1:].long().contiguous().view(-1),
         )
 
     # Compute accuracy
@@ -297,7 +294,9 @@ def train_step(
         contrastive_loss = 0.0
 
     # Combine Losses
-    reconstruction_loss = (seq_weight * seq_reconstruction_loss + word_weight * word_reconstruction_loss) / (seq_weight + word_weight)
+    reconstruction_loss = (
+        seq_weight * seq_reconstruction_loss + word_weight * word_reconstruction_loss
+    ) / (seq_weight + word_weight)
     total_loss = reconstruction_loss + contrastive_loss
 
     # Backpropagation
@@ -333,7 +332,9 @@ def train(
     model.train()
     model.to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
+    optimizer = optim.AdamW(
+        model.parameters(), lr=config.learning_rate, betas=(0.9, 0.98), eps=1e-6
+    )
     scaler = GradScaler("cuda")
     total_steps = math.ceil(len(dataset) / config.batch_size) * config.num_epochs
     scheduler = get_cosine_schedule_with_warmup(
@@ -341,10 +342,11 @@ def train(
     )
 
     weight = load_token_weights("token_weights.json", device)
-    reconstruction_loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+    recon_loss_seq = nn.CrossEntropyLoss(weight=weight, ignore_index=PAD_BYTE)
+    recon_loss_word = FocalLoss(gamma=1.0)
 
     # Initialize the contrastive loss
-    #contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
+    # contrastive_loss_fn = MultipleNegativesRankingLoss(scale=20.0)
     contrastive_loss_fn = None
 
     pid = PID(config.pid_Kp, config.pid_Ki, config.pid_Kd, setpoint=config.target_loss)
@@ -372,7 +374,9 @@ def train(
 
         for batch in tqdm(dataset.batch(config.batch_size), desc=f"Training"):
             try:
-                batch_inputs = prepare_batch(batch, tokenizer, config, device, noise_prob=prob)
+                batch_inputs = prepare_batch(
+                    batch, tokenizer, config, device, noise_prob=None
+                )
                 # Perform a training step
                 (
                     seq_loss,
@@ -390,7 +394,8 @@ def train(
                     optimizer=optimizer,
                     scaler=scaler,
                     scheduler=scheduler,
-                    reconstruction_loss_fn=reconstruction_loss_fn,
+                    recon_loss_seq=recon_loss_seq,
+                    recon_loss_word=recon_loss_word,
                     contrastive_loss_fn=contrastive_loss_fn,
                     pid=pid,
                     prob=prob,
@@ -435,6 +440,7 @@ def train(
 
             except Exception as e:
                 import traceback
+
                 print(f"Error at step {step}: {e}")
                 print(traceback.format_exc())
                 try:
@@ -498,18 +504,18 @@ def main():
 
     # Initialize Training Configuration
     training_config = TrainingConfig(
-        num_epochs=2,  # Adjust as needed
+        num_epochs=1,  # Adjust as needed
         batch_size=80,
-        learning_rate=5e-4,
-        warmup_steps=1000,
+        learning_rate=2e-4,
+        warmup_steps=2500,
         output_dir="./checkpoints",
         max_sequence_length=64,
         dataset_split="train",
         dataset_name="skymizer/fineweb-edu-dedup-45B",
         dataset_subset="default",
-        #dataset_subset="20231101.en",
-        #dataset_name="wikimedia/wikipedia",
-        #dataset_split="train[0:1000]",
+        # dataset_subset="20231101.en",
+        # dataset_name="wikimedia/wikipedia",
+        # dataset_split="train[0:1000]",
         seed=42,
         target_loss=0.2,  # Desired loss
         pid_Kp=1.0,  # Proportional gain
