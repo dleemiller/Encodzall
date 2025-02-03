@@ -65,9 +65,9 @@ def get_training_config(output_dir: str) -> TrainingConfig:
         # dataset_split="train[0:1000]",
         seed=42,
         target_loss=0.2,  # Desired loss
-        pid_Kp=1.0,  # Proportional gain
-        pid_Ki=0.1,  # Integral gain
-        pid_Kd=0.05,  # Derivative gain
+        pid_Kp=0.1,  # Proportional gain
+        pid_Ki=0.01,  # Integral gain
+        pid_Kd=0.005,  # Derivative gain
         prob_initial=0.0,  # Initial total noise + mask probability
         prob_min=0.0,  # Minimum total probability
         prob_max=1.0,  # Maximum total probability
